@@ -1,0 +1,29 @@
+# Otter 配置文件示例
+# 复制此文件到 ~/.agent/config.toml 并填入你的 API key
+
+stream = true
+max_steps = 100
+
+[[providers]]
+name = "anthropic"
+base_url = "https://api.whatai.cc"
+api_key = "sk-your-anthropic-api-key"
+default = true
+
+[[providers.models]]
+name = "claude-sonnet-4-5-20250929-thinking"
+default = true
+
+[[providers]]
+name = "kimi-for-coding"
+base_url = "https://api.kimi.com/coding/v1"
+api_key = "sk-your-kimi-api-key"
+
+[providers.headers]
+User-Agent = "RooCode/3.30.3"
+HTTP-Referer = "https://github.com/RooVetGit/Roo-Cline"
+X-Title = "Roo Code"
+
+[[providers.models]]
+name = "kimi-for-coding"
+alias = "kimi-k2.5"
