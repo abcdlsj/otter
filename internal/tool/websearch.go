@@ -34,6 +34,14 @@ func (WebSearch) Args() map[string]any {
 				"type":        "string",
 				"description": "Filter by time: 'pd' (past 24h), 'pw' (past week), 'pm' (past month), 'py' (past year)",
 			},
+			"country": map[string]any{
+				"type":        "string",
+				"description": "2-letter country code for region-specific results (e.g., 'US', 'CN', 'JP', 'DE')",
+			},
+			"language": map[string]any{
+				"type":        "string",
+				"description": "ISO language code for search results (e.g., 'en', 'zh', 'ja', 'de')",
+			},
 		},
 		"required": []string{"query"},
 	}
@@ -44,6 +52,8 @@ func (w WebSearch) Run(ctx context.Context, raw json.RawMessage) (string, error)
 		Query     string `json:"query"`
 		Count     int    `json:"count"`
 		Freshness string `json:"freshness"`
+		Country   string `json:"country"`
+		Language  string `json:"language"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return "", err
@@ -75,6 +85,12 @@ func (w WebSearch) Run(ctx context.Context, raw json.RawMessage) (string, error)
 	q.Set("offset", "0")
 	if args.Freshness != "" {
 		q.Set("freshness", args.Freshness)
+	}
+	if args.Country != "" {
+		q.Set("country", args.Country)
+	}
+	if args.Language != "" {
+		q.Set("search_lang", args.Language)
 	}
 	u.RawQuery = q.Encode()
 
