@@ -9,6 +9,8 @@
 - 文件读写操作
 - Shell 命令执行
 - 会话历史保存
+- **可自定义 System Prompt（支持模板和多模式）**
+- 代码搜索（grep）
 
 ## 安装
 
@@ -35,7 +37,21 @@ default = true
 [[providers.models]]
 name = "claude-sonnet-4-20250514"
 default = true
+
+# Prompt customization (optional)
+[prompt]
+# Use a custom prompt template file
+template_path = "~/.config/otter/prompts/custom.md"
+
+# Or define inline
+# template = """You are a helpful assistant..."""
+
+# Mode-specific prompts
+[prompt.modes.plan]
+template_path = "~/.config/otter/prompts/plan.md"
 ```
+
+See [docs/prompt-customization.md](docs/prompt-customization.md) for more details.
 
 ## 使用
 

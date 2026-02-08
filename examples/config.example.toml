@@ -1,0 +1,67 @@
+# Otter Configuration Example
+
+# Enable streaming responses
+stream = true
+
+# Maximum agent steps per conversation
+max_steps = 100
+
+# LLM Provider Configuration
+[[providers]]
+name = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "sk-your-api-key"
+default = true
+
+[[providers.models]]
+name = "claude-sonnet-4-20250514"
+default = true
+
+[[providers.models]]
+name = "claude-opus-4-20250514"
+alias = "opus"
+
+# Another provider example
+[[providers]]
+name = "openai"
+base_url = "https://api.openai.com"
+api_key = "sk-your-openai-key"
+
+[[providers.models]]
+name = "gpt-4o"
+default = true
+
+# Security settings
+[security]
+readonly = false
+confirm_destructive = true
+
+[security.file]
+allow_read = ["*"]
+allow_write = ["*"]
+# deny_read = ["*.env", "*.key"]
+# deny_write = ["*.env", "*.key"]
+
+# Prompt Customization
+[prompt]
+# Option 1: Use a template file
+# template_path = "~/.config/otter/prompts/custom.md"
+
+# Option 2: Inline template (uses Go template syntax)
+# template = """
+# You are a coding assistant running in {{.WorkingDir}}.
+# Available tools: {{range .Tools}}{{.Name}}, {{end}}
+# """
+
+# Mode-specific prompts for different agent behaviors
+[prompt.modes.plan]
+# Read-only mode for exploring and planning
+template_path = "~/.config/otter/prompts/plan.md"
+
+[prompt.modes.explore]
+# Quick exploration mode
+template_path = "~/.config/otter/prompts/explore.md"
+
+# You can define custom modes too
+# [prompt.modes.review]
+# template = """You are a code reviewer..."""
