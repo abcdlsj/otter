@@ -9,8 +9,8 @@
 - 文件读写操作
 - Shell 命令执行
 - 会话历史保存
-- **可自定义 System Prompt（支持模板和多模式）**
 - 代码搜索（grep）
+- 多模式 Agent（build/plan/explore）
 
 ## 安装
 
@@ -22,7 +22,7 @@ go build -o otter
 
 ## 配置
 
-创建 `~/.agent/config.toml`：
+创建 `~/.config/otter/config.toml`：
 
 ```toml
 stream = true
@@ -37,27 +37,21 @@ default = true
 [[providers.models]]
 name = "claude-sonnet-4-20250514"
 default = true
-
-# Prompt customization (optional)
-[prompt]
-# Use a custom prompt template file
-template_path = "~/.config/otter/prompts/custom.md"
-
-# Or define inline
-# template = """You are a helpful assistant..."""
-
-# Mode-specific prompts
-[prompt.modes.plan]
-template_path = "~/.config/otter/prompts/plan.md"
 ```
-
-See [docs/prompt-customization.md](docs/prompt-customization.md) for more details.
 
 ## 使用
 
 ```bash
 ./otter
 ```
+
+### Agent 模式
+
+Otter 内置多种优化后的 Agent 模式，通过系统 prompt 自动调整行为：
+
+- **build** (默认): 全功能编码助手，支持文件修改
+- **plan**: 只读模式，用于探索和分析代码库
+- **explore**: 快速搜索和定位代码
 
 ## 快捷键
 

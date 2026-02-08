@@ -241,24 +241,12 @@ const compactThreshold = 60000
 const compactKeepRecent = 6
 
 func (a *Agent) systemPrompt() string {
-	loader := prompt.NewLoader(&config.C.Prompt, a.tools)
+	loader := prompt.NewLoader(a.tools, a.maxSteps)
 
-	var content string
-	var err error
-
-	// Try mode-specific prompt first
-	if a.mode != "" && a.mode != "default" {
-		content, err = loader.LoadForMode(a.mode)
-	}
-
-	// Fall back to default if mode-specific fails
-	if err != nil || content == "" {
-		content, err = loader.Load()
-	}
-
+	content, err := loader.LoadForMode(a.mode)
 	if err != nil {
-		// Log error but continue with default
-		return loader.LoadFallback()
+		// Fallback to default on error
+		content, _ = loader.Load()
 	}
 
 	return content

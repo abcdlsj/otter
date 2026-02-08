@@ -36,26 +36,11 @@ type SecurityConfig struct {
 	File               FilePermission `toml:"file"`
 }
 
-// PromptModeConfig defines configuration for a specific agent mode
-type PromptModeConfig struct {
-	Template     string `toml:"template,omitempty"`
-	TemplatePath string `toml:"template_path,omitempty"`
-}
-
-// PromptConfig holds prompt customization settings
-type PromptConfig struct {
-	Template     string                      `toml:"template,omitempty"`
-	TemplatePath string                      `toml:"template_path,omitempty"`
-	Modes        map[string]PromptModeConfig `toml:"modes,omitempty"`
-	MaxSteps     int                         `toml:"max_steps,omitempty"`
-}
-
 type Config struct {
 	Providers []ProviderConfig `toml:"providers"`
 	Stream    bool             `toml:"stream"`
 	MaxSteps  int              `toml:"max_steps"`
 	Security  SecurityConfig   `toml:"security"`
-	Prompt    PromptConfig     `toml:"prompt"`
 
 	// 当前选中的 provider 和 model（运行时）
 	currentProviderIdx int
@@ -80,11 +65,6 @@ func Load() error {
 
 	// 初始化当前选中的 provider 和 model
 	C.initCurrentSelection()
-
-	// 设置 prompt 默认配置
-	if C.Prompt.MaxSteps == 0 {
-		C.Prompt.MaxSteps = C.MaxSteps
-	}
 
 	return nil
 }

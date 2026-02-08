@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"text/template"
 	"time"
 
-	"github.com/abcdlsj/otter/internal/config"
 	"github.com/abcdlsj/otter/internal/tool"
 )
 
@@ -31,88 +29,40 @@ type ToolInfo struct {
 
 // Loader handles prompt loading and rendering
 type Loader struct {
-	config     *config.PromptConfig
-	tools      *tool.Set
-	defaultTpl string
+	tools    *tool.Set
+	maxSteps int
 }
 
 // NewLoader creates a new prompt loader
-func NewLoader(cfg *config.PromptConfig, tools *tool.Set) *Loader {
-	if cfg == nil {
-		cfg = &config.PromptConfig{}
-	}
+func NewLoader(tools *tool.Set, maxSteps int) *Loader {
 	return &Loader{
-		config:     cfg,
-		tools:      tools,
-		defaultTpl: defaultSystemPromptTemplate,
+		tools:    tools,
+		maxSteps: maxSteps,
 	}
 }
 
-// Load loads and renders the system prompt
+// Load loads and renders the default system prompt
 func (l *Loader) Load() (string, error) {
-	tpl := l.defaultTpl
-
-	// Try to load custom template from file
-	if l.config.TemplatePath != "" {
-		content, err := os.ReadFile(l.config.TemplatePath)
-		if err == nil {
-			tpl = string(content)
-		}
-	}
-
-	// Override with inline template if provided
-	if l.config.Template != "" {
-		tpl = l.config.Template
-	}
-
-	return l.render(tpl)
+	return l.render(defaultSystemPromptTemplate)
 }
 
 // LoadForMode loads prompt for a specific agent mode
+// Supported modes: "default", "plan", "explore"
 func (l *Loader) LoadForMode(mode string) (string, error) {
-	// Check if there's a mode-specific template in config
-	if l.config.Modes != nil {
-		if modeCfg, ok := l.config.Modes[mode]; ok {
-			// Try file first
-			if modeCfg.TemplatePath != "" {
-				content, err := os.ReadFile(modeCfg.TemplatePath)
-				if err == nil {
-					return l.render(string(content))
-				}
-			}
-			// Fall back to inline template
-			if modeCfg.Template != "" {
-				return l.render(modeCfg.Template)
-			}
-		}
+	if mode == "" || mode == "default" {
+		return l.Load()
 	}
 
-	// Try built-in mode templates
-	if builtin, ok := ModeTemplates[mode]; ok {
-		return l.render(builtin)
+	if tpl, ok := ModeTemplates[mode]; ok {
+		return l.render(tpl)
 	}
 
-	// Fall back to default
 	return l.Load()
 }
 
-// LoadFallback returns the rendered built-in default template
-// Used when template rendering fails to ensure we always have a working prompt
-func (l *Loader) LoadFallback() string {
-	content, err := l.render(defaultSystemPromptTemplate)
-	if err != nil {
-		// Absolute fallback - return unrendered template
-		return defaultSystemPromptTemplate
-	}
-	return content
-}
-
 func (l *Loader) render(tpl string) (string, error) {
-	// Add custom functions
 	funcMap := template.FuncMap{
 		"join": strings.Join,
-		"now":  time.Now,
-		"env":  os.Getenv,
 	}
 
 	template, err := template.New("prompt").Funcs(funcMap).Parse(tpl)
@@ -147,13 +97,8 @@ func (l *Loader) buildData() TemplateData {
 		OS:         runtime.GOOS,
 		Date:       time.Now().Format("2006-01-02"),
 		Tools:      tools,
-		MaxSteps:   l.config.MaxSteps,
+		MaxSteps:   l.maxSteps,
 	}
-}
-
-// DefaultTemplatePath returns the default path for custom prompts
-func DefaultTemplatePath() string {
-	return filepath.Join(config.Home(), "prompts")
 }
 
 // defaultSystemPromptTemplate is the built-in default prompt
@@ -204,7 +149,7 @@ IMPORTANT: Minimize the number of tool calls. Each tool call is a round-trip —
 - Don't run destructive commands (rm -rf, git reset --hard, etc.) without user confirmation.
 - Refuse to write malicious code.`
 
-// ModeTemplates contains predefined templates for different agent modes
+// ModeTemplates contains system-defined templates for different agent modes
 var ModeTemplates = map[string]string{
 	"plan": `You are a planning-focused AI assistant. Your goal is to help users explore and understand their codebase.
 
@@ -225,7 +170,8 @@ var ModeTemplates = map[string]string{
 - Do NOT make any file modifications.
 - Help users plan changes before they execute them.
 - Provide clear explanations of how things work.
-- Suggest best practices and potential improvements.`,
+- Suggest best practices and potential improvements.
+- Think step by step about the approach before suggesting any changes.`,
 
 	"explore": `You are a code exploration assistant. Help users quickly find and understand code.
 
@@ -245,5 +191,6 @@ var ModeTemplates = map[string]string{
 - Be quick and efficient. Find what the user needs fast.
 - Use grep and search tools to locate code.
 - Provide concise summaries of what you find.
-- Reference exact file paths and line numbers.`,
+- Reference exact file paths and line numbers.
+- Don't over-explain — just show the relevant code.`,
 }
