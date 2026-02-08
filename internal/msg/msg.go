@@ -3,21 +3,27 @@ package msg
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/log"
+	"github.com/abcdlsj/otter/internal/event"
+	"github.com/abcdlsj/otter/internal/logger"
+	"github.com/abcdlsj/otter/internal/types"
 	"github.com/google/uuid"
 )
 
 type Msg struct {
-	ID      string    `json:"id"`
-	Session string    `json:"session"`
-	Role    string    `json:"role"` // user, assistant, system
-	Text    string    `json:"text"`
-	Time    time.Time `json:"time"`
+	ID          string             `json:"id"`
+	Session     string             `json:"session"`
+	Role        string             `json:"role"` // user, assistant, system, tool
+	Text        string             `json:"text"`
+	ToolCalls   []types.ToolCall   `json:"tool_calls,omitempty"`
+	ToolResults []types.ToolResult `json:"tool_results,omitempty"`
+	Time        time.Time          `json:"time"`
 }
 
 func New(session, role, text string) Msg {
@@ -43,17 +49,20 @@ type Session struct {
 }
 
 type Bus struct {
-	mu       sync.RWMutex
-	subs     map[string][]chan Msg
-	sessions map[string]*Session
-	dir      string
+	mu        sync.RWMutex
+	subs      map[string][]chan Msg
+	sessions  map[string]*Session
+	dir       string
+	eventSubs map[string][]chan event.Event
 }
 
 func NewBus(dir string) *Bus {
+	logger.Init(dir)
 	b := &Bus{
-		subs:     make(map[string][]chan Msg),
-		sessions: make(map[string]*Session),
-		dir:      dir,
+		subs:      make(map[string][]chan Msg),
+		sessions:  make(map[string]*Session),
+		dir:       dir,
+		eventSubs: make(map[string][]chan event.Event),
 	}
 	b.load()
 	return b
@@ -89,6 +98,9 @@ func (b *Bus) ListSessions() []*Session {
 	for _, s := range b.sessions {
 		list = append(list, s)
 	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].UpdatedAt.After(list[j].UpdatedAt)
+	})
 	return list
 }
 
@@ -97,29 +109,55 @@ func (b *Bus) DeleteSession(id string) {
 	defer b.mu.Unlock()
 	delete(b.sessions, id)
 	if b.dir != "" {
-		os.Remove(filepath.Join(b.dir, id+".jsonl"))
+		os.RemoveAll(filepath.Join(b.dir, id))
 	}
 }
 
-func (b *Bus) Sub(session string) <-chan Msg {
+func (b *Bus) SetSessionTitle(id, title string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	ch := make(chan Msg, 64)
-	b.subs[session] = append(b.subs[session], ch)
+	if s, ok := b.sessions[id]; ok {
+		s.Title = title
+	}
+}
+
+func sub[T any](mu sync.Locker, subs map[string][]chan T, session string) <-chan T {
+	mu.Lock()
+	defer mu.Unlock()
+	ch := make(chan T, 64)
+	subs[session] = append(subs[session], ch)
 	return ch
 }
 
-func (b *Bus) Unsub(session string, ch <-chan Msg) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	chs := b.subs[session]
+func unsub[T any](mu sync.Locker, subs map[string][]chan T, session string, ch <-chan T) {
+	mu.Lock()
+	defer mu.Unlock()
+	chs := subs[session]
 	for i, c := range chs {
 		if c == ch {
-			b.subs[session] = append(chs[:i], chs[i+1:]...)
+			subs[session] = append(chs[:i], chs[i+1:]...)
 			close(c)
 			return
 		}
 	}
+}
+
+func broadcast[T any](mu sync.Locker, subs map[string][]chan T, session string, v T) {
+	mu.Lock()
+	defer mu.Unlock()
+	for _, ch := range subs[session] {
+		select {
+		case ch <- v:
+		default:
+		}
+	}
+}
+
+func (b *Bus) Sub(session string) <-chan Msg            { return sub(&b.mu, b.subs, session) }
+func (b *Bus) Unsub(session string, ch <-chan Msg)      { unsub(&b.mu, b.subs, session, ch) }
+func (b *Bus) SubEvent(session string) <-chan event.Event { return sub(&b.mu, b.eventSubs, session) }
+func (b *Bus) UnsubEvent(session string, ch <-chan event.Event) {
+	unsub(&b.mu, b.eventSubs, session, ch)
 }
 
 func (b *Bus) Pub(m Msg) {
@@ -127,25 +165,53 @@ func (b *Bus) Pub(m Msg) {
 	if s, ok := b.sessions[m.Session]; ok {
 		s.Messages = append(s.Messages, m)
 		s.UpdatedAt = time.Now()
-		if len(s.Messages) == 1 && m.Role == "user" {
-			title := m.Text
-			if len(title) > 30 {
-				title = title[:30] + "..."
-			}
-			s.Title = title
-		}
 		b.appendMsg(m)
 	}
+	subs := make([]chan Msg, len(b.subs[m.Session]))
+	copy(subs, b.subs[m.Session])
 	b.mu.Unlock()
 
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for _, ch := range b.subs[m.Session] {
+	for _, ch := range subs {
 		select {
 		case ch <- m:
 		default:
 		}
 	}
+}
+
+func (b *Bus) pubEvent(session string, ev event.Event) {
+	broadcast(&b.mu, b.eventSubs, session, ev)
+}
+
+func (b *Bus) HandleEvents(sessionID string, events <-chan event.Event) <-chan event.Event {
+	out := make(chan event.Event, 64)
+	go func() {
+		defer close(out)
+		for ev := range events {
+			out <- ev
+			b.pubEvent(sessionID, ev)
+			switch ev.Type {
+			case event.CompactEnd:
+				if data, ok := ev.Data.(event.CompactEndData); ok {
+					b.Pub(New(sessionID, "system",
+						fmt.Sprintf("[compact] %d → %d tokens", data.Before, data.After)))
+				}
+			case event.Done:
+				if data, ok := ev.Data.(event.DoneData); ok {
+					for _, em := range data.Messages {
+						b.Pub(Msg{
+							Session:     sessionID,
+							Role:        em.Role,
+							Text:        em.Content,
+							ToolCalls:   em.ToolCalls,
+							ToolResults: em.ToolResults,
+						})
+					}
+				}
+			}
+		}
+	}()
+	return out
 }
 
 func (b *Bus) load() {
@@ -156,15 +222,15 @@ func (b *Bus) load() {
 
 	entries, err := os.ReadDir(b.dir)
 	if err != nil {
-		log.Warn("failed to read sessions dir", "err", err)
+		logger.Warn("failed to read sessions dir", "err", err)
 		return
 	}
 
 	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".jsonl" {
+		if !e.IsDir() {
 			continue
 		}
-		sessionID := e.Name()[:len(e.Name())-6] // remove .jsonl
+		sessionID := e.Name()
 		msgs := b.loadSession(sessionID)
 		if len(msgs) == 0 {
 			continue
@@ -172,11 +238,11 @@ func (b *Bus) load() {
 		s := b.rebuildSession(sessionID, msgs)
 		b.sessions[sessionID] = s
 	}
-	log.Info("loaded sessions", "count", len(b.sessions))
+	logger.Info("loaded sessions", "count", len(b.sessions))
 }
 
 func (b *Bus) loadSession(id string) []Msg {
-	f, err := os.Open(filepath.Join(b.dir, id+".jsonl"))
+	f, err := os.Open(filepath.Join(b.dir, id, "session.jsonl"))
 	if err != nil {
 		return nil
 	}
@@ -205,8 +271,8 @@ func (b *Bus) rebuildSession(id string, msgs []Msg) *Session {
 		for _, m := range msgs {
 			if m.Role == "user" {
 				title := m.Text
-				if len(title) > 30 {
-					title = title[:30] + "..."
+				if len([]rune(title)) > 30 {
+					title = string([]rune(title)[:30]) + "..."
 				}
 				s.Title = title
 				break
@@ -220,10 +286,12 @@ func (b *Bus) appendMsg(m Msg) {
 	if b.dir == "" {
 		return
 	}
-	path := filepath.Join(b.dir, m.Session+".jsonl")
+	dir := filepath.Join(b.dir, m.Session)
+	os.MkdirAll(dir, 0755)
+	path := filepath.Join(dir, "session.jsonl")
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		log.Warn("failed to open session file", "err", err)
+		logger.Warn("failed to open session file", "err", err)
 		return
 	}
 	defer f.Close()

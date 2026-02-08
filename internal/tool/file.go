@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+)
+
+const (
+	defaultReadLimit = 2000
+	maxLineLength    = 2000
+	maxBytes         = 50 * 1024
 )
 
 type File struct{}
@@ -33,6 +40,14 @@ func (File) Args() map[string]any {
 				"type":        "string",
 				"description": "search pattern (regex) for search action",
 			},
+			"offset": map[string]any{
+				"type":        "number",
+				"description": "line number to start reading from (0-based)",
+			},
+			"limit": map[string]any{
+				"type":        "number",
+				"description": fmt.Sprintf("number of lines to read (defaults to %d)", defaultReadLimit),
+			},
 		},
 		"required": []string{"action", "path"},
 	}
@@ -44,6 +59,8 @@ func (File) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 		Path    string `json:"path"`
 		Content string `json:"content"`
 		Pattern string `json:"pattern"`
+		Offset  int    `json:"offset"`
+		Limit   int    `json:"limit"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return "", err
@@ -51,11 +68,7 @@ func (File) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 
 	switch args.Action {
 	case "read":
-		data, err := os.ReadFile(args.Path)
-		if err != nil {
-			return "", err
-		}
-		return string(data), nil
+		return readFile(args.Path, args.Offset, args.Limit)
 
 	case "write":
 		if err := os.MkdirAll(filepath.Dir(args.Path), 0755); err != nil {
@@ -102,4 +115,57 @@ func (File) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	}
 
 	return "", fmt.Errorf("unknown action: %s", args.Action)
+}
+
+func readFile(path string, offset, limit int) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	if limit <= 0 {
+		limit = defaultReadLimit
+	}
+
+	scanner := bufio.NewScanner(f)
+	lineNum := 0
+	lines := []string{}
+	bytes := 0
+
+	for scanner.Scan() {
+		if lineNum < offset {
+			lineNum++
+			continue
+		}
+		if len(lines) >= limit {
+			break
+		}
+
+		line := scanner.Text()
+		if len([]rune(line)) > maxLineLength {
+			line = string([]rune(line)[:maxLineLength]) + "..."
+		}
+
+		lineBytes := len(line) + 1
+		if bytes+lineBytes > maxBytes {
+			lines = append(lines, "...")
+			break
+		}
+		bytes += lineBytes
+
+		lines = append(lines, fmt.Sprintf("%d| %s", lineNum+1, line))
+		lineNum++
+	}
+
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+
+	output := strings.Join(lines, "\n")
+	if len(lines) >= limit || bytes >= maxBytes {
+		output += fmt.Sprintf("\n\n(File has more lines. Use 'offset' parameter to read beyond line %d)", lineNum)
+	}
+
+	return output, nil
 }

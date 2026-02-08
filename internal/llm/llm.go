@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/abcdlsj/otter/internal/config"
+	"github.com/abcdlsj/otter/internal/logger"
+	"github.com/abcdlsj/otter/internal/types"
 	"github.com/tmc/langchaingo/llms"
 )
 
@@ -12,19 +14,8 @@ type Message struct {
 	Role             string
 	Content          string
 	ReasoningContent string
-	ToolCalls        []ToolCall
-	ToolResults      []ToolResult
-}
-
-type ToolCall struct {
-	ID   string
-	Name string
-	Args string
-}
-
-type ToolResult struct {
-	ToolCallID string
-	Content    string
+	ToolCalls        []types.ToolCall
+	ToolResults      []types.ToolResult
 }
 
 type Tool struct {
@@ -36,8 +27,10 @@ type Tool struct {
 type Response struct {
 	Content          string
 	ReasoningContent string
-	ToolCalls        []ToolCall
+	ToolCalls        []types.ToolCall
 	StopReason       string
+	InputTokens      int64
+	OutputTokens     int64
 }
 
 type StreamChunk struct {
@@ -46,16 +39,8 @@ type StreamChunk struct {
 }
 
 type Provider interface {
-	Chat(ctx context.Context, lg Logger, messages []Message, tools []Tool, toolResults []ToolResult) (*Response, error)
-	ChatStream(ctx context.Context, lg Logger, messages []Message, tools []Tool, toolResults []ToolResult) (<-chan StreamChunk, <-chan *Response)
-}
-
-type Logger interface {
-	WriteJSON(filename string, data []byte) error
-	Debug(msg string, keyvals ...any)
-	Info(msg string, keyvals ...any)
-	Warn(msg string, keyvals ...any)
-	Error(msg string, keyvals ...any)
+	Chat(ctx context.Context, lg logger.Logger, messages []Message, tools []Tool, toolResults []types.ToolResult) (*Response, error)
+	ChatStream(ctx context.Context, lg logger.Logger, messages []Message, tools []Tool, toolResults []types.ToolResult) (<-chan StreamChunk, <-chan *Response)
 }
 
 type LLM struct {
@@ -91,11 +76,11 @@ func CreateProviderFromConfig() (Provider, error) {
 	}
 }
 
-func (l *LLM) Chat(ctx context.Context, lg Logger, messages []Message, tools []Tool, toolResults []ToolResult) (*Response, error) {
+func (l *LLM) Chat(ctx context.Context, lg logger.Logger, messages []Message, tools []Tool, toolResults []types.ToolResult) (*Response, error) {
 	return l.provider.Chat(ctx, lg, messages, tools, toolResults)
 }
 
-func (l *LLM) ChatStream(ctx context.Context, lg Logger, messages []Message, tools []Tool, toolResults []ToolResult) (<-chan StreamChunk, <-chan *Response) {
+func (l *LLM) ChatStream(ctx context.Context, lg logger.Logger, messages []Message, tools []Tool, toolResults []types.ToolResult) (<-chan StreamChunk, <-chan *Response) {
 	return l.provider.ChatStream(ctx, lg, messages, tools, toolResults)
 }
 
@@ -111,7 +96,7 @@ func FromLangchainMessages(msgs []llms.MessageContent) []Message {
 			case llms.TextContent:
 				msg.Content += p.Text
 			case llms.ToolCall:
-				msg.ToolCalls = append(msg.ToolCalls, ToolCall{
+				msg.ToolCalls = append(msg.ToolCalls, types.ToolCall{
 					ID:   p.ID,
 					Name: p.FunctionCall.Name,
 					Args: p.FunctionCall.Arguments,

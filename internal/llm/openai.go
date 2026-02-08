@@ -2,10 +2,14 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/abcdlsj/otter/internal/logger"
+	"github.com/abcdlsj/otter/internal/types"
 	"github.com/sashabaranov/go-openai"
 )
 
@@ -47,22 +51,23 @@ func NewOpenAIProvider(apiKey, model, baseURL string, headers map[string]string)
 	}, nil
 }
 
-func (p *OpenAIProvider) Chat(ctx context.Context, lg Logger, messages []Message, tools []Tool, toolResults []ToolResult) (*Response, error) {
+func (p *OpenAIProvider) Chat(ctx context.Context, lg logger.Logger, messages []Message, tools []Tool, toolResults []types.ToolResult) (*Response, error) {
 	req := p.buildChatRequest(messages, tools)
 
-	if lg != nil {
-		lg.Debug("openai request", "messages", len(messages), "tools", len(tools))
+	if debug, _ := json.MarshalIndent(req, "", "  "); debug != nil {
+		lg.WriteJSON(fmt.Sprintf("request_%s_openai.json", time.Now().Format("150405")), debug)
 	}
+	lg.Debug("openai request", "model", p.model, "messages", len(messages), "tools", len(tools))
 
 	resp, err := p.client.CreateChatCompletion(ctx, req)
 	if err != nil {
-		if lg != nil {
-			lg.Error("openai request failed", "error", err)
-		}
+		lg.Error("openai request failed", "error", err)
 		return nil, err
 	}
 
-	if lg != nil {
+	if resp.Usage.PromptTokens > 0 || resp.Usage.CompletionTokens > 0 {
+		lg.Info("openai response received", "usage_prompt", resp.Usage.PromptTokens, "usage_completion", resp.Usage.CompletionTokens)
+	} else {
 		lg.Info("openai response received")
 	}
 
@@ -75,9 +80,15 @@ func (p *OpenAIProvider) Chat(ctx context.Context, lg Logger, messages []Message
 		Content:          choice.Message.Content,
 		ReasoningContent: choice.Message.ReasoningContent,
 	}
+	if resp.Usage.PromptTokens > 0 {
+		response.InputTokens = int64(resp.Usage.PromptTokens)
+	}
+	if resp.Usage.CompletionTokens > 0 {
+		response.OutputTokens = int64(resp.Usage.CompletionTokens)
+	}
 
 	for _, tc := range choice.Message.ToolCalls {
-		response.ToolCalls = append(response.ToolCalls, ToolCall{
+		response.ToolCalls = append(response.ToolCalls, types.ToolCall{
 			ID:   tc.ID,
 			Name: tc.Function.Name,
 			Args: tc.Function.Arguments,
@@ -87,7 +98,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, lg Logger, messages []Message
 	return response, nil
 }
 
-func (p *OpenAIProvider) ChatStream(ctx context.Context, lg Logger, messages []Message, tools []Tool, toolResults []ToolResult) (<-chan StreamChunk, <-chan *Response) {
+func (p *OpenAIProvider) ChatStream(ctx context.Context, lg logger.Logger, messages []Message, tools []Tool, toolResults []types.ToolResult) (<-chan StreamChunk, <-chan *Response) {
 	chunkCh := make(chan StreamChunk, 16)
 	respCh := make(chan *Response, 1)
 
@@ -105,7 +116,8 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, lg Logger, messages []M
 
 		var fullContent strings.Builder
 		var fullReasoning strings.Builder
-		toolCallsMap := make(map[int]*ToolCall)
+		toolCallsMap := make(map[int]*types.ToolCall)
+		var inputTokens, outputTokens int64
 
 		for {
 			chunk, err := stream.Recv()
@@ -114,6 +126,11 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, lg Logger, messages []M
 					chunkCh <- StreamChunk{Error: err}
 				}
 				break
+			}
+
+			if chunk.Usage != nil {
+				inputTokens = int64(chunk.Usage.PromptTokens)
+				outputTokens = int64(chunk.Usage.CompletionTokens)
 			}
 
 			if len(chunk.Choices) == 0 {
@@ -138,7 +155,7 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, lg Logger, messages []M
 				}
 
 				if _, exists := toolCallsMap[idx]; !exists {
-					toolCallsMap[idx] = &ToolCall{}
+					toolCallsMap[idx] = &types.ToolCall{}
 				}
 
 				if tc.ID != "" {
@@ -151,10 +168,20 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, lg Logger, messages []M
 			}
 		}
 
-		var toolCalls []ToolCall
+		var toolCalls []types.ToolCall
 		for i := 0; i < len(toolCallsMap); i++ {
 			if tc, ok := toolCallsMap[i]; ok {
 				toolCalls = append(toolCalls, *tc)
+			}
+		}
+
+		if inputTokens == 0 {
+			inputTokens = EstimateMessagesTokens(messages, p.model)
+		}
+		if outputTokens == 0 {
+			outputTokens = EstimateOutputTokens(fullContent.String(), toolCalls, p.model)
+			if fullReasoning.Len() > 0 {
+				outputTokens += estimateTokens(fullReasoning.String(), p.model)
 			}
 		}
 
@@ -162,6 +189,8 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, lg Logger, messages []M
 			Content:          fullContent.String(),
 			ReasoningContent: fullReasoning.String(),
 			ToolCalls:        toolCalls,
+			InputTokens:      inputTokens,
+			OutputTokens:     outputTokens,
 		}
 	}()
 
@@ -174,19 +203,34 @@ func (p *OpenAIProvider) buildChatRequest(messages []Message, tools []Tool) open
 		if msg.Role == "tool" && len(msg.ToolResults) > 0 {
 			for _, result := range msg.ToolResults {
 				msgs = append(msgs, openai.ChatCompletionMessage{
-					Role:       "tool",
+					Role:       openai.ChatMessageRoleTool,
 					Content:    result.Content,
 					ToolCallID: result.ToolCallID,
 				})
 			}
 		} else {
-			msgs = append(msgs, p.toOpenAIMessage(msg))
+			m := openai.ChatCompletionMessage{
+				Role:             msg.Role,
+				Content:          msg.Content,
+				ReasoningContent: msg.ReasoningContent,
+			}
+			for _, tc := range msg.ToolCalls {
+				m.ToolCalls = append(m.ToolCalls, openai.ToolCall{
+					ID:   tc.ID,
+					Type: openai.ToolTypeFunction,
+					Function: openai.FunctionCall{
+						Name:      tc.Name,
+						Arguments: tc.Args,
+					},
+				})
+			}
+			msgs = append(msgs, m)
 		}
 	}
 
-	var openaiTools []openai.Tool
+	var openAITools []openai.Tool
 	for _, t := range tools {
-		openaiTools = append(openaiTools, openai.Tool{
+		openAITools = append(openAITools, openai.Tool{
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
 				Name:        t.Name,
@@ -197,37 +241,17 @@ func (p *OpenAIProvider) buildChatRequest(messages []Message, tools []Tool) open
 	}
 
 	return openai.ChatCompletionRequest{
-		Model:    p.model,
-		Messages: msgs,
-		Tools:    openaiTools,
+		Model:         p.model,
+		Messages:      msgs,
+		Tools:         openAITools,
+		StreamOptions: &openai.StreamOptions{IncludeUsage: true},
 	}
 }
 
-func (p *OpenAIProvider) toOpenAIMessage(msg Message) openai.ChatCompletionMessage {
-	if msg.Role == "tool" && len(msg.ToolResults) > 0 {
-		return openai.ChatCompletionMessage{
-			Role:       "tool",
-			Content:    msg.ToolResults[0].Content,
-			ToolCallID: msg.ToolResults[0].ToolCallID,
-		}
-	}
+func (p *OpenAIProvider) Name() string {
+	return "openai"
+}
 
-	var toolCalls []openai.ToolCall
-	for _, tc := range msg.ToolCalls {
-		toolCalls = append(toolCalls, openai.ToolCall{
-			ID:   tc.ID,
-			Type: openai.ToolTypeFunction,
-			Function: openai.FunctionCall{
-				Name:      tc.Name,
-				Arguments: tc.Args,
-			},
-		})
-	}
-
-	return openai.ChatCompletionMessage{
-		Role:             msg.Role,
-		Content:          msg.Content,
-		ReasoningContent: msg.ReasoningContent,
-		ToolCalls:        toolCalls,
-	}
+func (p *OpenAIProvider) Model() string {
+	return p.model
 }

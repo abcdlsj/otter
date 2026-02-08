@@ -17,6 +17,7 @@ import (
 	"github.com/abcdlsj/otter/internal/config"
 	"github.com/abcdlsj/otter/internal/event"
 	"github.com/abcdlsj/otter/internal/llm"
+	"github.com/abcdlsj/otter/internal/logger"
 	"github.com/abcdlsj/otter/internal/msg"
 	"github.com/abcdlsj/otter/internal/tool"
 )
@@ -38,12 +39,16 @@ type Model struct {
 	spinner  spinner.Model
 	messages []message
 
-	session    string
-	thinking   bool
-	toolName   string
-	autoScroll bool
-	cancel     context.CancelFunc
-	events     <-chan event.Event
+	inputTokens  int64
+	outputTokens int64
+
+	sessionsDir string
+	session     string
+	thinking    bool
+	toolName    string
+	autoScroll  bool
+	cancel      context.CancelFunc
+	events      <-chan event.Event
 
 	mdRenderer *glamour.TermRenderer
 
@@ -67,13 +72,14 @@ func New(a *agent.Agent, t *tool.Set, b *msg.Bus) Model {
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#888A85"))
 
 	return Model{
-		agent:      a,
-		tools:      t,
-		bus:        b,
-		input:      ta,
-		spinner:    sp,
-		session:    newSessionID(),
-		autoScroll: true,
+		agent:       a,
+		tools:       t,
+		bus:         b,
+		input:       ta,
+		spinner:     sp,
+		sessionsDir: config.SessionsDir(),
+		session:     newSessionID(),
+		autoScroll:  true,
 	}
 }
 
@@ -87,12 +93,30 @@ func (m Model) Init() tea.Cmd {
 }
 
 type eventMsg event.Event
+type titleMsg struct{}
+
+func generateTitleCmd(a *agent.Agent, bus *msg.Bus, sid string, lg logger.Logger, text string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		title, err := a.GenerateTitle(ctx, lg, text)
+		if err != nil {
+			lg.Warn("generate title failed", "err", err)
+			return nil
+		}
+		if title != "" {
+			bus.SetSessionTitle(sid, title)
+		}
+		return titleMsg{}
+	}
+}
 
 func waitForEvent(ch <-chan event.Event) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {
-			return eventMsg{Type: event.Done}
+			// Channel closed, agent finished
+			return nil
 		}
 		return eventMsg(ev)
 	}
@@ -188,6 +212,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 
+	case titleMsg:
+		return m, nil
+
 	case eventMsg:
 		return m.handleEvent(event.Event(msg))
 	}
@@ -213,15 +240,24 @@ func (m Model) send(text string) (tea.Model, tea.Cmd) {
 	m.updateViewport()
 
 	session := m.bus.GetOrCreateSession(m.session)
-	historyMessages := session.Messages
+	isFirstMessage := len(session.Messages) == 0
+
+	history := msgsToLLM(session.Messages)
 
 	m.bus.Pub(msg.User(m.session, text))
 
+	lg := logger.NewFileLogger(logger.SessionLogDir(m.sessionsDir, m.session))
+
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	m.events = m.agent.Run(ctx, m.session, historyMessages, text)
+	rawEvents := m.agent.Run(ctx, lg, history, text)
+	m.events = m.bus.HandleEvents(m.session, rawEvents)
 
-	return m, tea.Batch(m.spinner.Tick, waitForEvent(m.events))
+	cmds := []tea.Cmd{m.spinner.Tick, waitForEvent(m.events)}
+	if isFirstMessage {
+		cmds = append(cmds, generateTitleCmd(m.agent, m.bus, m.session, lg, text))
+	}
+	return m, tea.Batch(cmds...)
 }
 
 func (m *Model) handleCommand(text string) (tea.Cmd, bool) {
@@ -335,13 +371,63 @@ func (m *Model) handleCommand(text string) (tea.Cmd, bool) {
 		m.updateViewport()
 		return nil, true
 
+	case "/sessions":
+		sessions := m.bus.ListSessions()
+		content := "Sessions:\n"
+		for _, s := range sessions {
+			marker := "  "
+			if s.ID == m.session {
+				marker = "* "
+			}
+			content += marker + s.ID + " - " + s.Title + "\n"
+		}
+		if len(sessions) == 0 {
+			content = "No sessions found."
+		}
+		m.messages = append(m.messages, message{role: "system", content: content})
+		m.input.Reset()
+		m.updateViewport()
+		return nil, true
+
+	case "/switch":
+		if len(parts) < 2 {
+			m.messages = append(m.messages, message{
+				role:    "system",
+				content: "Usage: /switch <session_id>",
+			})
+			m.input.Reset()
+			m.updateViewport()
+			return nil, true
+		}
+		targetID := parts[1]
+		session := m.bus.GetSession(targetID)
+		if session == nil {
+			m.messages = append(m.messages, message{
+				role:    "error",
+				content: fmt.Sprintf("Session '%s' not found. Use /sessions to list available sessions.", targetID),
+			})
+			m.input.Reset()
+			m.updateViewport()
+			return nil, true
+		}
+		m.session = targetID
+		m.messages = nil
+		for _, msg := range session.Messages {
+			m.messages = append(m.messages, message{role: msg.Role, content: msg.Text})
+		}
+		m.input.Reset()
+		m.updateViewport()
+		return nil, true
+
 	case "/help":
 		help := `Commands:
-  /new     Create new session
-  /clear   Clear messages
-  /models  List available models
-  /model   Switch model (e.g., /model kimi/kimi-k2.5)
-  /help    Show this help
+  /new      Create new session
+  /clear    Clear messages
+  /sessions List all sessions
+  /switch   Switch session (e.g., /switch <session_id>)
+  /models   List available models
+  /model    Switch model (e.g., /model kimi/kimi-k2.5)
+  /help     Show this help
 
 Shortcuts:
    Enter    Send message
@@ -392,6 +478,26 @@ func (m Model) handleEvent(ev event.Event) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(m.spinner.Tick, waitForEvent(m.events))
 
+	case event.CompactStart:
+		if data, ok := ev.Data.(event.CompactStartData); ok {
+			m.messages = append(m.messages, message{
+				role:    "compact:start",
+				content: fmt.Sprintf("tokens %d exceeded %d", data.Tokens, data.Threshold),
+			})
+			m.updateViewport()
+		}
+		return m, tea.Batch(m.spinner.Tick, waitForEvent(m.events))
+
+	case event.CompactEnd:
+		if data, ok := ev.Data.(event.CompactEndData); ok {
+			m.messages = append(m.messages, message{
+				role:    "compact:end",
+				content: fmt.Sprintf("%d → %d tokens", data.Before, data.After),
+			})
+			m.updateViewport()
+		}
+		return m, tea.Batch(m.spinner.Tick, waitForEvent(m.events))
+
 	case event.TextDelta:
 		if data, ok := ev.Data.(event.TextDeltaData); ok {
 			if len(m.messages) > 0 && m.messages[len(m.messages)-1].role == "assistant" {
@@ -404,13 +510,14 @@ func (m Model) handleEvent(ev event.Event) (tea.Model, tea.Cmd) {
 		return m, waitForEvent(m.events)
 
 	case event.Done:
-		if data, ok := ev.Data.(event.DoneData); ok && data.FullText != "" {
-			m.bus.Pub(msg.Bot(m.session, data.FullText))
+		if data, ok := ev.Data.(event.DoneData); ok {
+			m.inputTokens += data.InputTokens
+			m.outputTokens += data.OutputTokens
 		}
 		m.thinking = false
 		m.toolName = ""
 		m.updateViewport()
-		return m, nil
+		return m, waitForEvent(m.events)
 
 	case event.Error:
 		if data, ok := ev.Data.(event.ErrorData); ok {
@@ -465,7 +572,7 @@ var (
 	primary   = lipgloss.Color("#729FCF")
 	secondary = lipgloss.Color("#FCAF3E")
 	success   = lipgloss.Color("#8AE234")
-	error     = lipgloss.Color("#EF2929")
+	errColor  = lipgloss.Color("#EF2929")
 	fgBase    = lipgloss.Color("#D3D7CF")
 	fgMuted   = lipgloss.Color("#BABDB6")
 	fgSubtle  = lipgloss.Color("#555753")
@@ -494,8 +601,8 @@ func (m *Model) renderMsg(sb *strings.Builder, msg message) {
 		sb.WriteString(lipgloss.NewStyle().Foreground(fgSubtle).Italic(true).Render("// " + msg.content))
 		sb.WriteString("\n")
 	case msg.role == "error":
-		sb.WriteString(lipgloss.NewStyle().Foreground(error).SetString("✗").String() + " " +
-			lipgloss.NewStyle().Foreground(error).Render(msg.content))
+		sb.WriteString(lipgloss.NewStyle().Foreground(errColor).SetString("✗").String() + " " +
+			lipgloss.NewStyle().Foreground(errColor).Render(msg.content))
 		sb.WriteString("\n")
 	case strings.HasPrefix(msg.role, "tool:start:"):
 		m.renderToolStart(sb, strings.TrimPrefix(msg.role, "tool:start:"), msg.args)
@@ -503,6 +610,18 @@ func (m *Model) renderMsg(sb *strings.Builder, msg message) {
 		m.renderToolEnd(sb, strings.TrimPrefix(msg.role, "tool:end:"), msg.content, msg.args)
 	case strings.HasPrefix(msg.role, "tool:error:"):
 		m.renderToolError(sb, strings.TrimPrefix(msg.role, "tool:error:"), msg.content, msg.args)
+	case msg.role == "compact:start":
+		icon := lipgloss.NewStyle().Foreground(lipgloss.Color("#AD7FA8")).SetString("⟳")
+		sb.WriteString("  " + icon.String() + " " +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#AD7FA8")).Render("Compacting history") +
+			" " + lipgloss.NewStyle().Foreground(fgMuted).Render("("+msg.content+")"))
+		sb.WriteString("\n")
+	case msg.role == "compact:end":
+		icon := lipgloss.NewStyle().Foreground(lipgloss.Color("#AD7FA8")).Bold(true).SetString("⟳")
+		sb.WriteString("  " + icon.String() + " " +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#AD7FA8")).Render("Compacted") +
+			" " + lipgloss.NewStyle().Foreground(fgMuted).Render("("+msg.content+")"))
+		sb.WriteString("\n")
 	}
 }
 
@@ -510,8 +629,8 @@ func (m *Model) formatToolArgs(args string) string {
 	if args == "" {
 		return ""
 	}
-	if len(args) > 60 {
-		args = args[:60] + "..."
+	if len([]rune(args)) > 60 {
+		args = string([]rune(args)[:60]) + "..."
 	}
 	return " " + lipgloss.NewStyle().Foreground(fgMuted).Render("("+args+")")
 }
@@ -560,12 +679,12 @@ func (m *Model) renderToolEnd(sb *strings.Builder, name, content, args string) {
 }
 
 func (m *Model) renderToolError(sb *strings.Builder, name, content, args string) {
-	icon := lipgloss.NewStyle().Foreground(error).Bold(true).SetString("✗")
+	icon := lipgloss.NewStyle().Foreground(errColor).Bold(true).SetString("✗")
 	label := lipgloss.NewStyle().Foreground(secondary).Render(name)
 	sb.WriteString("  " + icon.String() + " Failed " + label + m.formatToolArgs(args))
 	if content != "" {
 		sb.WriteString("\n")
-		sb.WriteString(lipgloss.NewStyle().Foreground(error).Render("    " + content))
+		sb.WriteString(lipgloss.NewStyle().Foreground(errColor).Render("    " + content))
 	}
 	sb.WriteString("\n")
 }
@@ -581,8 +700,12 @@ func (m Model) View() string {
 	}
 
 	sessionLabel := lipgloss.NewStyle().Foreground(fgSubtle).Render("Session ")
-	sessionID := lipgloss.NewStyle().Foreground(primary).Render(m.session)
-	header := sessionLabel + sessionID
+	sessionTitle := "New Chat"
+	if s := m.bus.GetSession(m.session); s != nil {
+		sessionTitle = s.Title
+	}
+	headerText := lipgloss.NewStyle().Foreground(primary).Render(sessionTitle)
+	header := sessionLabel + headerText
 
 	var statusLine string
 	if m.thinking {
@@ -616,9 +739,15 @@ func (m Model) View() string {
 	if config.C.Stream {
 		streamMode = "ON"
 	}
-	modelInfo := lipgloss.NewStyle().Foreground(secondary).Render(config.C.CurrentProviderName()+"/"+config.C.CurrentModelName()) +
-		lipgloss.NewStyle().Foreground(fgMuted).Render(" | ")
+	modelInfo := lipgloss.NewStyle().Foreground(secondary).Render(config.C.CurrentProviderName() + "/" + config.C.CurrentModelName())
+	tokenInput := lipgloss.NewStyle().Foreground(fgMuted).Render(fmt.Sprintf("input:%d", m.inputTokens))
+	tokenOutput := lipgloss.NewStyle().Foreground(fgMuted).Render(fmt.Sprintf("output:%d", m.outputTokens))
 	shortcuts := modelInfo +
+		lipgloss.NewStyle().Foreground(fgMuted).Render(" | ") +
+		tokenInput +
+		lipgloss.NewStyle().Foreground(fgMuted).Render(" | ") +
+		tokenOutput +
+		lipgloss.NewStyle().Foreground(fgMuted).Render(" | ") +
 		lipgloss.NewStyle().Foreground(fgBase).Render("Enter") +
 		lipgloss.NewStyle().Foreground(fgMuted).Render(" send  ") +
 		lipgloss.NewStyle().Foreground(fgBase).Render("Ctrl+J") +
@@ -640,4 +769,17 @@ func (m Model) View() string {
 	parts = append(parts, shortcuts)
 
 	return strings.Join(parts, "\n")
+}
+
+func msgsToLLM(msgs []msg.Msg) []llm.Message {
+	out := make([]llm.Message, len(msgs))
+	for i, m := range msgs {
+		out[i] = llm.Message{
+			Role:        m.Role,
+			Content:     m.Text,
+			ToolCalls:   m.ToolCalls,
+			ToolResults: m.ToolResults,
+		}
+	}
+	return out
 }

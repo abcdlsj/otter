@@ -3,7 +3,11 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"time"
 
+	"github.com/abcdlsj/otter/internal/logger"
+	"github.com/abcdlsj/otter/internal/types"
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
@@ -28,7 +32,7 @@ func NewAnthropicProvider(apiKey, model, baseURL string) (*AnthropicProvider, er
 	}, nil
 }
 
-func (p *AnthropicProvider) Chat(ctx context.Context, lg Logger, messages []Message, tools []Tool, toolResults []ToolResult) (*Response, error) {
+func (p *AnthropicProvider) Chat(ctx context.Context, lg logger.Logger, messages []Message, tools []Tool, toolResults []types.ToolResult) (*Response, error) {
 	// 构建消息
 	var apiMessages []anthropic.MessageParam
 	var systemContent string
@@ -56,12 +60,19 @@ func (p *AnthropicProvider) Chat(ctx context.Context, lg Logger, messages []Mess
 				blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
 			}
 			for _, tc := range msg.ToolCalls {
-				// 将 JSON 字符串解析为对象
 				var args map[string]any
 				json.Unmarshal([]byte(tc.Args), &args)
 				blocks = append(blocks, anthropic.NewToolUseBlock(tc.ID, args, tc.Name))
 			}
 			apiMessages = append(apiMessages, anthropic.NewAssistantMessage(blocks...))
+		} else if msg.Role == "tool" {
+			var blocks []anthropic.ContentBlockParamUnion
+			for _, tr := range msg.ToolResults {
+				blocks = append(blocks, anthropic.NewToolResultBlock(tr.ToolCallID, tr.Content, false))
+			}
+			if len(blocks) > 0 {
+				apiMessages = append(apiMessages, anthropic.NewUserMessage(blocks...))
+			}
 		}
 	}
 
@@ -95,29 +106,27 @@ func (p *AnthropicProvider) Chat(ctx context.Context, lg Logger, messages []Mess
 		params.Tools = toolUnions
 	}
 
-	if lg != nil {
-		if debug, _ := json.MarshalIndent(params, "", "  "); debug != nil {
-			lg.WriteJSON("request.json", debug)
-			lg.Debug("llm request", "model", p.model, "messages", len(messages), "tools", len(tools))
-		}
+	if debug, _ := json.MarshalIndent(params, "", "  "); debug != nil {
+		lg.WriteJSON(fmt.Sprintf("request_%s_anthropic.json", time.Now().Format("150405")), debug)
+		lg.Debug("llm request", "model", p.model, "messages", len(messages), "tools", len(tools))
 	}
 
 	resp, err := p.client.Messages.New(ctx, params)
 	if err != nil {
-		if lg != nil {
-			lg.Error("llm request failed", "error", err)
-		}
+		lg.Error("llm request failed", "error", err)
 		return nil, err
 	}
 
-	if lg != nil {
+	if resp.Usage.InputTokens > 0 || resp.Usage.OutputTokens > 0 {
 		lg.Info("llm response", "stop_reason", resp.StopReason, "usage_input", resp.Usage.InputTokens, "usage_output", resp.Usage.OutputTokens)
+	} else {
+		lg.Info("llm response", "stop_reason", resp.StopReason)
 	}
 
-	return parseAnthropicResponse(resp), nil
+	return parseAnthropicResponse(resp, messages), nil
 }
 
-func (p *AnthropicProvider) ChatStream(ctx context.Context, lg Logger, messages []Message, tools []Tool, toolResults []ToolResult) (<-chan StreamChunk, <-chan *Response) {
+func (p *AnthropicProvider) ChatStream(ctx context.Context, lg logger.Logger, messages []Message, tools []Tool, toolResults []types.ToolResult) (<-chan StreamChunk, <-chan *Response) {
 	chunkCh := make(chan StreamChunk, 16)
 	respCh := make(chan *Response, 1)
 
@@ -141,9 +150,9 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, lg Logger, messages 
 	return chunkCh, respCh
 }
 
-func parseAnthropicResponse(resp *anthropic.Message) *Response {
+func parseAnthropicResponse(resp *anthropic.Message, messages []Message) *Response {
 	var content string
-	var toolCalls []ToolCall
+	var toolCalls []types.ToolCall
 
 	for _, block := range resp.Content {
 		switch b := block.AsAny().(type) {
@@ -151,7 +160,7 @@ func parseAnthropicResponse(resp *anthropic.Message) *Response {
 			content += b.Text
 		case anthropic.ToolUseBlock:
 			argsJSON, _ := json.Marshal(b.Input)
-			toolCalls = append(toolCalls, ToolCall{
+			toolCalls = append(toolCalls, types.ToolCall{
 				ID:   b.ID,
 				Name: b.Name,
 				Args: string(argsJSON),
@@ -159,9 +168,20 @@ func parseAnthropicResponse(resp *anthropic.Message) *Response {
 		}
 	}
 
-	return &Response{
+	response := &Response{
 		Content:    content,
 		ToolCalls:  toolCalls,
 		StopReason: string(resp.StopReason),
 	}
+	if resp.Usage.InputTokens > 0 {
+		response.InputTokens = int64(resp.Usage.InputTokens)
+	} else {
+		response.InputTokens = EstimateMessagesTokens(messages, "claude")
+	}
+	if resp.Usage.OutputTokens > 0 {
+		response.OutputTokens = int64(resp.Usage.OutputTokens)
+	} else {
+		response.OutputTokens = EstimateOutputTokens(content, toolCalls, "claude")
+	}
+	return response
 }

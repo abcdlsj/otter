@@ -173,5 +173,20 @@ func Home() string {
 }
 
 func SessionsDir() string {
-	return filepath.Join(Home(), "sessions")
+	return filepath.Join(Home(), "sessions", WorkDirName())
+}
+
+func WorkDirName() string {
+	wd, _ := os.Getwd()
+	if wd == "" {
+		return "default"
+	}
+
+	last := filepath.Base(wd)
+	parent := filepath.Base(filepath.Dir(wd))
+
+	if parent == "." || parent == "/" {
+		return last
+	}
+	return parent + "_" + last
 }
