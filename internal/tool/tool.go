@@ -38,6 +38,7 @@ func NewSet() *Set {
 	s.Add(&View{})
 	s.Add(&WebFetch{})
 	s.Add(&WebSearch{})
+	s.Add(&Git{})
 	return s
 }
 
