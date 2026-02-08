@@ -33,6 +33,7 @@ func NewSet() *Set {
 	s := &Set{tools: make(map[string]Tool)}
 	s.Add(&Shell{})
 	s.Add(&File{})
+	s.Add(&Grep{})
 	return s
 }
 

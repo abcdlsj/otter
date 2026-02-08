@@ -1,0 +1,170 @@
+package tool
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+)
+
+type Grep struct{}
+
+func (Grep) Name() string { return "grep" }
+func (Grep) Desc() string { return "Search file contents using regex pattern" }
+func (Grep) Args() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"pattern": map[string]any{
+				"type":        "string",
+				"description": "Regex pattern to search for",
+			},
+			"path": map[string]any{
+				"type":        "string",
+				"description": "Directory or file to search in",
+			},
+			"glob": map[string]any{
+				"type":        "string",
+				"description": "File glob pattern to filter files (e.g., '*.go', '*.ts')",
+			},
+			"max_results": map[string]any{
+				"type":        "number",
+				"description": "Maximum number of results to return (default: 50)",
+			},
+		},
+		"required": []string{"pattern", "path"},
+	}
+}
+
+func (Grep) Run(ctx context.Context, raw json.RawMessage) (string, error) {
+	var args struct {
+		Pattern    string `json:"pattern"`
+		Path       string `json:"path"`
+		Glob       string `json:"glob"`
+		MaxResults int    `json:"max_results"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return "", err
+	}
+
+	if args.MaxResults <= 0 {
+		args.MaxResults = 50
+	}
+
+	// Compile regex
+	re, err := regexp.Compile(args.Pattern)
+	if err != nil {
+		return "", fmt.Errorf("invalid regex pattern: %w", err)
+	}
+
+	// Check if path is a file or directory
+	info, err := os.Stat(args.Path)
+	if err != nil {
+		return "", fmt.Errorf("cannot access path: %w", err)
+	}
+
+	var results []string
+	resultCount := 0
+
+	if info.IsDir() {
+		err = grepDir(ctx, args.Path, args.Glob, re, &results, &resultCount, args.MaxResults)
+	} else {
+		err = grepFile(args.Path, re, &results, &resultCount, args.MaxResults)
+	}
+
+	if err != nil {
+		return "", err
+	}
+
+	if len(results) == 0 {
+		return "no matches found", nil
+	}
+
+	output := strings.Join(results, "\n")
+	if resultCount >= args.MaxResults {
+		output += fmt.Sprintf("\n\n... (truncated, showing %d of %d+ matches)", args.MaxResults, resultCount)
+	}
+	return output, nil
+}
+
+func grepDir(ctx context.Context, dir string, glob string, re *regexp.Regexp, results *[]string, count *int, max int) error {
+	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // Skip files we can't access
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		if d.IsDir() {
+			// Skip hidden directories and common ignore patterns
+			name := d.Name()
+			if strings.HasPrefix(name, ".") && name != "." {
+				return filepath.SkipDir
+			}
+			if name == "node_modules" || name == "vendor" || name == "dist" || name == "build" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Check glob pattern
+		if glob != "" {
+			matched, err := filepath.Match(glob, filepath.Base(path))
+			if err != nil || !matched {
+				return nil
+			}
+		}
+
+		// Skip binary/large files
+		if info, err := d.Info(); err == nil && info.Size() > 1024*1024 {
+			return nil
+		}
+
+		return grepFile(path, re, results, count, max)
+	})
+}
+
+func grepFile(path string, re *regexp.Regexp, results *[]string, count *int, max int) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil // Skip files we can't open
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	lineNum := 0
+	localCount := 0
+
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Text()
+
+		if re.MatchString(line) {
+			localCount++
+			*count++
+
+			if len(*results) < max {
+				// Truncate long lines
+				display := line
+				if len([]rune(display)) > 200 {
+					display = string([]rune(display)[:200]) + "..."
+				}
+				*results = append(*results, fmt.Sprintf("%s:%d: %s", path, lineNum, display))
+			}
+
+			if *count >= max {
+				return nil
+			}
+		}
+	}
+
+	return scanner.Err()
+}
