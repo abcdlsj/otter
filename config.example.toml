@@ -1,8 +1,19 @@
 # Otter 配置文件示例
-# 复制此文件到 ~/.agent/config.toml 并填入你的 API key
+# 复制此文件到 ~/.config/otter/config.toml 并填入你的 API key
 
 stream = true
 max_steps = 100
+
+# 安全配置（可选）
+[security]
+# readonly = true  # 启用只读模式，禁止所有写入操作
+# confirm_destructive = true  # 覆盖已有文件前需要确认
+
+# [security.file]
+# allow_read = ["*"]  # 允许读取的文件模式
+# deny_read = [".env", "*.key", "*.pem"]  # 禁止读取的文件模式
+# allow_write = ["*.go", "*.md", "*.txt"]  # 允许写入的文件模式
+# deny_write = [".git/*", "go.mod", "go.sum"]  # 禁止写入的文件模式
 
 [[providers]]
 name = "anthropic"
