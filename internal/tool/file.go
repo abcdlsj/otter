@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/abcdlsj/otter/internal/config"
 )
 
 const (
@@ -20,7 +22,7 @@ const (
 type File struct{}
 
 func (File) Name() string { return "file" }
-func (File) Desc() string { return "Read, write, list, or search files" }
+func (File) Desc() string { return "Read, write, list, or search files (respects security settings)" }
 func (File) Args() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -53,7 +55,7 @@ func (File) Args() map[string]any {
 	}
 }
 
-func (File) Run(ctx context.Context, raw json.RawMessage) (string, error) {
+func (f File) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	var args struct {
 		Action  string `json:"action"`
 		Path    string `json:"path"`
@@ -66,11 +68,36 @@ func (File) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 		return "", err
 	}
 
+	// Clean the path
+	args.Path = filepath.Clean(args.Path)
+
+	// Check permissions based on action
+	cfg := &config.C
+	switch args.Action {
+	case "read", "list", "search":
+		if !cfg.CheckReadPermission(args.Path) {
+			return "", fmt.Errorf("permission denied: cannot read %s", args.Path)
+		}
+	case "write":
+		if !cfg.CheckWritePermission(args.Path) {
+			if cfg.Security.Readonly {
+				return "", fmt.Errorf("permission denied: readonly mode is enabled")
+			}
+			return "", fmt.Errorf("permission denied: cannot write to %s", args.Path)
+		}
+	}
+
 	switch args.Action {
 	case "read":
 		return readFile(args.Path, args.Offset, args.Limit)
 
 	case "write":
+		// Additional safety: check if file exists (overwrite protection)
+		if cfg.Security.ConfirmDestructive {
+			if _, err := os.Stat(args.Path); err == nil {
+				return "", fmt.Errorf("confirmation required: file %s already exists. Set confirm_destructive=false to allow overwrites", args.Path)
+			}
+		}
 		if err := os.MkdirAll(filepath.Dir(args.Path), 0755); err != nil {
 			return "", err
 		}
