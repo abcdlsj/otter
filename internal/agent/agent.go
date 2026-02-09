@@ -186,8 +186,8 @@ func (a *Agent) runTools(ctx context.Context, calls []types.ToolCall, ch chan ev
 			continue
 		}
 
-		if len(result) > 4000 {
-			result = result[:4000] + "\n... (truncated)"
+		if len(result) > maxToolResultLen {
+			result = result[:maxToolResultLen] + "\n... (truncated)"
 		}
 
 		a.sendToolEnd(ch, tc.ID, tc.Name, result, "")
@@ -220,15 +220,17 @@ func (a *Agent) GenerateTitle(ctx context.Context, lg logger.Logger, text string
 	if err != nil {
 		return "", err
 	}
-	title := strings.TrimSpace(resp.Content)
-	if len([]rune(title)) > 20 {
-		title = string([]rune(title)[:20])
-	}
+	title := types.TruncateRunes(strings.TrimSpace(resp.Content), maxTitleLen)
 	return title, nil
 }
 
-const compactThreshold = 60000
-const compactKeepRecent = 6
+const (
+	compactThreshold   = 60000
+	compactKeepRecent  = 6
+	maxToolResultLen   = 4000
+	maxTitleLen        = 20
+	maxSummaryContent  = 500
+)
 
 func (a *Agent) systemPrompt() string {
 	return prompt.Load(a.tools, a.maxSteps, a.mode)
@@ -237,6 +239,11 @@ func (a *Agent) systemPrompt() string {
 // SetMode changes the agent's mode dynamically
 func (a *Agent) SetMode(mode string) {
 	a.mode = mode
+}
+
+// Mode returns the current mode
+func (a *Agent) Mode() string {
+	return a.mode
 }
 
 func (a *Agent) maybeCompact(ctx context.Context, lg logger.Logger, ch chan event.Event, messages []llm.Message) []llm.Message {
@@ -290,9 +297,9 @@ func (a *Agent) summarize(ctx context.Context, lg logger.Logger, messages []llm.
 			sb.WriteString(fmt.Sprintf("[tool_call %s]: %s(%s)\n", tc.ID, tc.Name, tc.Args))
 		}
 		for _, tr := range m.ToolResults {
-			content := tr.Content
-			if len([]rune(content)) > 500 {
-				content = string([]rune(content)[:500]) + "..."
+			content := types.TruncateRunes(tr.Content, maxSummaryContent)
+			if len(content) < len(tr.Content) {
+				content += "..."
 			}
 			sb.WriteString(fmt.Sprintf("[tool_result %s]: %s\n", tr.ToolCallID, content))
 		}

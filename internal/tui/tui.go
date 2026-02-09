@@ -20,9 +20,13 @@ import (
 	"github.com/abcdlsj/otter/internal/logger"
 	"github.com/abcdlsj/otter/internal/msg"
 	"github.com/abcdlsj/otter/internal/tool"
+	"github.com/abcdlsj/otter/internal/types"
 )
 
-const maxToolResultLines = 8
+const (
+	maxToolResultLines = 8
+	maxArgsDisplay     = 60
+)
 
 type message struct {
 	role    string
@@ -86,6 +90,24 @@ func New(a *agent.Agent, t *tool.Set, b *msg.Bus) Model {
 func newSessionID() string {
 	now := time.Now()
 	return fmt.Sprintf("%s_%03d", now.Format("20060102_150405"), now.Nanosecond()/1000000)
+}
+
+func (m *Model) cycleMode() {
+	modes := []string{"default", "plan", "explore"}
+	cur := m.agent.Mode()
+	next := "default"
+	for i, mode := range modes {
+		if mode == cur {
+			next = modes[(i+1)%len(modes)]
+			break
+		}
+	}
+	m.agent.SetMode(next)
+	m.messages = append(m.messages, message{
+		role:    "system",
+		content: fmt.Sprintf("Switched to %s mode", next),
+	})
+	m.updateViewport()
 }
 
 func (m Model) Init() tea.Cmd {
@@ -162,6 +184,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.messages = append(m.messages, message{role: "system", content: fmt.Sprintf("Stream mode: %s", mode)})
 				m.updateViewport()
+			}
+			return m, nil
+
+		case "tab":
+			if !m.thinking {
+				m.cycleMode()
 			}
 			return m, nil
 
@@ -270,186 +298,154 @@ func (m *Model) handleCommand(text string) (tea.Cmd, bool) {
 	case "/new":
 		m.session = newSessionID()
 		m.messages = nil
-		m.input.Reset()
-		m.updateViewport()
-		return nil, true
-
 	case "/clear":
 		m.messages = nil
-		m.input.Reset()
-		m.updateViewport()
-		return nil, true
-
 	case "/models":
-		models := config.C.ListModels()
-		content := "Available models:\n"
-		for _, model := range models {
-			marker := "  "
-			if model == config.C.CurrentProviderName()+"/"+config.C.CurrentModelName() {
-				marker = "* "
-			}
-			content += marker + model + "\n"
-		}
-		m.messages = append(m.messages, message{role: "system", content: content})
-		m.input.Reset()
-		m.updateViewport()
-		return nil, true
-
+		m.cmdModels()
 	case "/model":
-		if len(parts) < 2 {
-			m.messages = append(m.messages, message{
-				role:    "system",
-				content: "Usage: /model <provider>/<model> or /model <model-alias>",
-			})
-			m.input.Reset()
-			m.updateViewport()
-			return nil, true
-		}
-
-		// Parse provider/model
-		var providerName, modelName string
-		if strings.Contains(parts[1], "/") {
-			p := strings.SplitN(parts[1], "/", 2)
-			providerName = p[0]
-			modelName = p[1]
-		} else {
-			// Try to find by alias
-			found := false
-			for _, p := range config.C.Providers {
-				for _, m := range p.Models {
-					if m.Alias == parts[1] || m.Name == parts[1] {
-						providerName = p.Name
-						modelName = m.Name
-						found = true
-						break
-					}
-				}
-				if found {
-					break
-				}
-			}
-			if !found {
-				m.messages = append(m.messages, message{
-					role:    "error",
-					content: fmt.Sprintf("Model '%s' not found. Use /models to list available models.", parts[1]),
-				})
-				m.input.Reset()
-				m.updateViewport()
-				return nil, true
-			}
-		}
-
-		if config.C.SetModel(providerName, modelName) {
-			// Recreate LLM client
-			newLLM, err := llm.New()
-			if err != nil {
-				m.messages = append(m.messages, message{
-					role:    "error",
-					content: fmt.Sprintf("Failed to switch model: %v", err),
-				})
-			} else {
-				m.agent = agent.New(newLLM, m.tools)
-				m.messages = append(m.messages, message{
-					role:    "system",
-					content: fmt.Sprintf("Switched to %s/%s", providerName, config.C.CurrentModelName()),
-				})
-				// Save config to persist the model change
-				if err := config.Save(); err != nil {
-					m.messages = append(m.messages, message{
-						role:    "error",
-						content: fmt.Sprintf("Failed to save config: %v", err),
-					})
-				}
-			}
-		} else {
-			m.messages = append(m.messages, message{
-				role:    "error",
-				content: fmt.Sprintf("Model '%s/%s' not found. Use /models to list available models.", providerName, modelName),
-			})
-		}
-		m.input.Reset()
-		m.updateViewport()
-		return nil, true
-
+		m.cmdModel(parts)
 	case "/sessions":
-		sessions := m.bus.ListSessions()
-		content := "Sessions:\n"
-		for _, s := range sessions {
-			marker := "  "
-			if s.ID == m.session {
-				marker = "* "
-			}
-			content += marker + s.ID + " - " + s.Title + "\n"
-		}
-		if len(sessions) == 0 {
-			content = "No sessions found."
-		}
-		m.messages = append(m.messages, message{role: "system", content: content})
-		m.input.Reset()
-		m.updateViewport()
-		return nil, true
-
+		m.cmdSessions()
 	case "/switch":
-		if len(parts) < 2 {
-			m.messages = append(m.messages, message{
-				role:    "system",
-				content: "Usage: /switch <session_id>",
-			})
-			m.input.Reset()
-			m.updateViewport()
-			return nil, true
-		}
-		targetID := parts[1]
-		session := m.bus.GetSession(targetID)
-		if session == nil {
-			m.messages = append(m.messages, message{
-				role:    "error",
-				content: fmt.Sprintf("Session '%s' not found. Use /sessions to list available sessions.", targetID),
-			})
-			m.input.Reset()
-			m.updateViewport()
-			return nil, true
-		}
-		m.session = targetID
-		m.messages = nil
-		for _, msg := range session.Messages {
-			m.messages = append(m.messages, message{role: msg.Role, content: msg.Text})
-		}
-		m.input.Reset()
-		m.updateViewport()
-		return nil, true
-
+		m.cmdSwitch(parts)
 	case "/compact":
-		m.messages = append(m.messages, message{
-			role:    "system",
-			content: "Auto-compact triggers at 60000 tokens or 20+ messages. Current session will be compacted automatically when needed.",
-		})
-		m.input.Reset()
-		m.updateViewport()
-		return nil, true
-
+		m.addSystemMsg("Auto-compact triggers at 60000 tokens. Session compacts automatically when needed.")
 	case "/help":
-		help := `Commands:
+		m.cmdHelp()
+	default:
+		return nil, false
+	}
+
+	m.input.Reset()
+	m.updateViewport()
+	return nil, true
+}
+
+func (m *Model) addSystemMsg(content string) {
+	m.messages = append(m.messages, message{role: "system", content: content})
+}
+
+func (m *Model) addErrorMsg(content string) {
+	m.messages = append(m.messages, message{role: "error", content: content})
+}
+
+func (m *Model) cmdModels() {
+	var sb strings.Builder
+	sb.WriteString("Available models:\n")
+	current := config.C.CurrentProviderName() + "/" + config.C.CurrentModelName()
+	for _, model := range config.C.ListModels() {
+		if model == current {
+			sb.WriteString("* ")
+		} else {
+			sb.WriteString("  ")
+		}
+		sb.WriteString(model)
+		sb.WriteString("\n")
+	}
+	m.addSystemMsg(sb.String())
+}
+
+func (m *Model) cmdModel(parts []string) {
+	if len(parts) < 2 {
+		m.addSystemMsg("Usage: /model <provider>/<model> or /model <model-alias>")
+		return
+	}
+
+	provider, model := m.resolveModel(parts[1])
+	if provider == "" {
+		m.addErrorMsg(fmt.Sprintf("Model '%s' not found. Use /models to list.", parts[1]))
+		return
+	}
+
+	if !config.C.SetModel(provider, model) {
+		m.addErrorMsg(fmt.Sprintf("Model '%s/%s' not found.", provider, model))
+		return
+	}
+
+	newLLM, err := llm.New()
+	if err != nil {
+		m.addErrorMsg(fmt.Sprintf("Failed to switch model: %v", err))
+		return
+	}
+
+	m.agent = agent.New(newLLM, m.tools)
+	m.addSystemMsg(fmt.Sprintf("Switched to %s/%s", provider, config.C.CurrentModelName()))
+
+	if err := config.Save(); err != nil {
+		m.addErrorMsg(fmt.Sprintf("Failed to save config: %v", err))
+	}
+}
+
+func (m *Model) resolveModel(input string) (provider, model string) {
+	if strings.Contains(input, "/") {
+		p := strings.SplitN(input, "/", 2)
+		return p[0], p[1]
+	}
+	for _, p := range config.C.Providers {
+		for _, mod := range p.Models {
+			if mod.Alias == input || mod.Name == input {
+				return p.Name, mod.Name
+			}
+		}
+	}
+	return "", ""
+}
+
+func (m *Model) cmdSessions() {
+	sessions := m.bus.ListSessions()
+	if len(sessions) == 0 {
+		m.addSystemMsg("No sessions found.")
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString("Sessions:\n")
+	for _, s := range sessions {
+		if s.ID == m.session {
+			sb.WriteString("* ")
+		} else {
+			sb.WriteString("  ")
+		}
+		sb.WriteString(s.ID)
+		sb.WriteString(" - ")
+		sb.WriteString(s.Title)
+		sb.WriteString("\n")
+	}
+	m.addSystemMsg(sb.String())
+}
+
+func (m *Model) cmdSwitch(parts []string) {
+	if len(parts) < 2 {
+		m.addSystemMsg("Usage: /switch <session_id>")
+		return
+	}
+	session := m.bus.GetSession(parts[1])
+	if session == nil {
+		m.addErrorMsg(fmt.Sprintf("Session '%s' not found.", parts[1]))
+		return
+	}
+	m.session = parts[1]
+	m.messages = nil
+	for _, msg := range session.Messages {
+		m.messages = append(m.messages, message{role: msg.Role, content: msg.Text})
+	}
+}
+
+func (m *Model) cmdHelp() {
+	m.addSystemMsg(`Commands:
   /new      Create new session
   /clear    Clear messages
   /sessions List all sessions
-  /switch   Switch session (e.g., /switch <session_id>)
+  /switch   Switch session
   /models   List available models
-  /model    Switch model (e.g., /model kimi/kimi-k2.5)
-  /compact  Compact conversation history to reduce tokens
+  /model    Switch model
+  /compact  Show compact info
   /help     Show this help
 
 Shortcuts:
-   Enter    Send message
-   Ctrl+J   New line
-   Ctrl+C   Quit`
-		m.messages = append(m.messages, message{role: "system", content: help})
-		m.input.Reset()
-		m.updateViewport()
-		return nil, true
-	}
-
-	return nil, false
+  Enter   Send message
+  Tab     Switch mode
+  Ctrl+J  New line
+  Ctrl+C  Quit`)
 }
 
 func (m Model) handleEvent(ev event.Event) (tea.Model, tea.Cmd) {
@@ -639,10 +635,11 @@ func (m *Model) formatToolArgs(args string) string {
 	if args == "" {
 		return ""
 	}
-	if len([]rune(args)) > 60 {
-		args = string([]rune(args)[:60]) + "..."
+	truncated := types.TruncateRunes(args, maxArgsDisplay)
+	if len(truncated) < len(args) {
+		truncated += "..."
 	}
-	return " " + lipgloss.NewStyle().Foreground(fgMuted).Render("("+args+")")
+	return " " + lipgloss.NewStyle().Foreground(fgMuted).Render("("+truncated+")")
 }
 
 func (m *Model) renderToolStart(sb *strings.Builder, name, args string) {
@@ -752,12 +749,17 @@ func (m Model) View() string {
 	modelInfo := lipgloss.NewStyle().Foreground(secondary).Render(config.C.CurrentProviderName() + "/" + config.C.CurrentModelName())
 	tokenInput := lipgloss.NewStyle().Foreground(fgMuted).Render(fmt.Sprintf("input:%d", m.inputTokens))
 	tokenOutput := lipgloss.NewStyle().Foreground(fgMuted).Render(fmt.Sprintf("output:%d", m.outputTokens))
+	modeInfo := lipgloss.NewStyle().Foreground(secondary).Render(m.agent.Mode())
 	shortcuts := modelInfo +
+		lipgloss.NewStyle().Foreground(fgMuted).Render(" | ") +
+		modeInfo +
 		lipgloss.NewStyle().Foreground(fgMuted).Render(" | ") +
 		tokenInput +
 		lipgloss.NewStyle().Foreground(fgMuted).Render(" | ") +
 		tokenOutput +
 		lipgloss.NewStyle().Foreground(fgMuted).Render(" | ") +
+		lipgloss.NewStyle().Foreground(fgBase).Render("Tab") +
+		lipgloss.NewStyle().Foreground(fgMuted).Render(" mode  ") +
 		lipgloss.NewStyle().Foreground(fgBase).Render("Enter") +
 		lipgloss.NewStyle().Foreground(fgMuted).Render(" send  ") +
 		lipgloss.NewStyle().Foreground(fgBase).Render("Ctrl+J") +
