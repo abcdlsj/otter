@@ -4,20 +4,23 @@ An AI Agent assistant implemented in Go.
 
 ## Core Philosophy
 
-- **Minimalist Aesthetics**: Clean and elegant code, hack when you can, avoid over-engineering
-- **Make It Work First**: MVP first, iterate and optimize later
+- **Aesthetics is Productivity**: Beautiful code is the first priority
+- **Efficiency & Correctness**: Extreme efficiency, rationality, and correctness
+- **Perfect Code-ism**: Pursuit of perfect code
+- **Clean and Elegant**: Hack when you can, but make it beautiful
 
 ## Code Style
 
-Rob Pike's style Go code:
+Rob Pike's style Go code, elevated:
 
-- Short naming: `i`, `s *Session`
-- Use interface sparingly, only when polymorphism is needed
-- Composition over inheritance
-- Handle errors immediately: `if err != nil { return err }`
-- Avoid over-abstraction
-- Small functions, fit on one screen
-- Names are documentation, only comment complex algorithms
+- **Short naming**: `i`, `s *Session`
+- **Use interface sparingly**: Only when polymorphism is needed
+- **Composition over inheritance**
+- **Handle errors immediately**: `if err != nil { return err }`
+- **Avoid over-abstraction**: But don't sacrifice elegance
+- **Small functions, fit on one screen**
+- **Names are documentation**: Only comment complex algorithms
+- **Aesthetics first**: If it looks ugly, refactor it
 
 ## Architecture
 
@@ -65,3 +68,7 @@ max_steps = 100
 ```
 
 Sessions are persisted to `~/.config/otter/sessions/*.jsonl`
+
+---
+
+**Author's Code Style**: Extreme efficiency, rationality, and correctness. Perfect code-ism. Aesthetics is the first productivity.
