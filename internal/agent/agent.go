@@ -11,6 +11,7 @@ import (
 	"github.com/abcdlsj/otter/internal/event"
 	"github.com/abcdlsj/otter/internal/llm"
 	"github.com/abcdlsj/otter/internal/logger"
+	"github.com/abcdlsj/otter/internal/msg"
 	"github.com/abcdlsj/otter/internal/prompt"
 	"github.com/abcdlsj/otter/internal/tool"
 	"github.com/abcdlsj/otter/internal/types"
@@ -328,4 +329,56 @@ func (a *Agent) summarize(ctx context.Context, lg logger.Logger, messages []llm.
 		return "", err
 	}
 	return strings.TrimSpace(resp.Content), nil
+}
+
+// CompactNow performs immediate compaction without event channel
+// Returns (success, beforeTokens, afterTokens)
+func (a *Agent) CompactNow(ctx context.Context, lg logger.Logger, msgs []msg.Msg) (bool, int, int) {
+	// Convert msg.Msg to llm.Message
+	messages := make([]llm.Message, 0, len(msgs))
+	for _, m := range msgs {
+		messages = append(messages, llm.Message{
+			Role:        m.Role,
+			Content:     m.Text,
+			ToolCalls:   m.ToolCalls,
+			ToolResults: m.ToolResults,
+		})
+	}
+
+	tokens := llm.EstimateMessagesTokens(messages, config.C.CurrentModelName())
+
+	// Check if compaction is needed
+	if tokens < compactThreshold && len(messages) < 20 {
+		lg.Info("compact not needed", "tokens", tokens, "threshold", compactThreshold, "msg_count", len(messages))
+		return false, tokens, tokens
+	}
+
+	if len(messages) <= compactKeepRecent+1 {
+		return false, tokens, tokens
+	}
+
+	sys := messages[0]
+	recent := messages[len(messages)-compactKeepRecent:]
+	toCompact := messages[1 : len(messages)-compactKeepRecent]
+
+	lg.Info("manual compact triggered", "tokens", tokens, "msg_count", len(messages))
+
+	summary, err := a.summarize(ctx, lg, toCompact)
+	if err != nil {
+		lg.Warn("compact failed", "err", err)
+		return false, tokens, tokens
+	}
+
+	result := make([]llm.Message, 0, compactKeepRecent+2)
+	result = append(result, sys)
+	result = append(result, llm.Message{
+		Role:    "user",
+		Content: "[Previous conversation summary]\n" + summary,
+	})
+	result = append(result, recent...)
+
+	newTokens := llm.EstimateMessagesTokens(result, config.C.CurrentModelName())
+	lg.Info("compact done", "before", tokens, "after", newTokens, "summarized_msgs", len(toCompact))
+
+	return true, tokens, newTokens
 }
