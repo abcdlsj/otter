@@ -419,6 +419,22 @@ func (m *Model) handleCommand(text string) (tea.Cmd, bool) {
 		m.updateViewport()
 		return nil, true
 
+	case "/compact":
+		// Trigger manual compact by sending a system message
+		m.messages = append(m.messages, message{
+			role:    "system",
+			content: "Manual compaction triggered. The next AI response will compact the conversation history.",
+		})
+		// Add a hidden marker message that will trigger compact in next agent run
+		m.bus.Pub(msg.Msg{
+			SessionID: m.session,
+			Role:      "system",
+			Text:      "__COMPACT_REQUESTED__",
+		})
+		m.input.Reset()
+		m.updateViewport()
+		return nil, true
+
 	case "/help":
 		help := `Commands:
   /new      Create new session
@@ -427,6 +443,7 @@ func (m *Model) handleCommand(text string) (tea.Cmd, bool) {
   /switch   Switch session (e.g., /switch <session_id>)
   /models   List available models
   /model    Switch model (e.g., /model kimi/kimi-k2.5)
+  /compact  Compact conversation history to reduce tokens
   /help     Show this help
 
 Shortcuts:
