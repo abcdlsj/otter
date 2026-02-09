@@ -419,6 +419,15 @@ func (m *Model) handleCommand(text string) (tea.Cmd, bool) {
 		m.updateViewport()
 		return nil, true
 
+	case "/compact":
+		m.messages = append(m.messages, message{
+			role:    "system",
+			content: "Auto-compact triggers at 60000 tokens or 20+ messages. Current session will be compacted automatically when needed.",
+		})
+		m.input.Reset()
+		m.updateViewport()
+		return nil, true
+
 	case "/help":
 		help := `Commands:
   /new      Create new session
@@ -427,6 +436,7 @@ func (m *Model) handleCommand(text string) (tea.Cmd, bool) {
   /switch   Switch session (e.g., /switch <session_id>)
   /models   List available models
   /model    Switch model (e.g., /model kimi/kimi-k2.5)
+  /compact  Compact conversation history to reduce tokens
   /help     Show this help
 
 Shortcuts:

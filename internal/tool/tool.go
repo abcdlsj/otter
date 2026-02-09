@@ -33,7 +33,15 @@ func NewSet() *Set {
 	s := &Set{tools: make(map[string]Tool)}
 	s.Add(&Shell{})
 	s.Add(&File{})
+	s.Add(&Edit{})
 	s.Add(&Grep{})
+	s.Add(&List{})
+	s.Add(&View{})
+	s.Add(&Glob{})
+	s.Add(&WebFetch{})
+	s.Add(&WebSearch{})
+	s.Add(&Git{})
+	s.Add(&Compact{})
 	return s
 }
 
