@@ -19,6 +19,10 @@ func (Shell) Args() map[string]any {
 				"type":        "string",
 				"description": "command to run",
 			},
+			"timeout": map[string]any{
+				"type":        "number",
+				"description": "Timeout in seconds (default: 30, max: 300)",
+			},
 		},
 		"required": []string{"cmd"},
 	}
