@@ -37,6 +37,7 @@ func NewSet() *Set {
 	s.Add(&Grep{})
 	s.Add(&List{})
 	s.Add(&View{})
+	s.Add(&Glob{})
 	s.Add(&WebFetch{})
 	s.Add(&WebSearch{})
 	s.Add(&Git{})
