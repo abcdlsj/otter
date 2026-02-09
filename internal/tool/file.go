@@ -170,8 +170,8 @@ func readFile(path string, offset, limit int) (string, error) {
 		}
 
 		line := scanner.Text()
-		if len([]rune(line)) > maxLineLength {
-			line = string([]rune(line)[:maxLineLength]) + "..."
+		if len(line) > maxLineLength {
+			line = line[:maxLineLength] + "..."
 		}
 
 		lineBytes := len(line) + 1

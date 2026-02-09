@@ -97,17 +97,14 @@ func (Grep) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 func grepDir(ctx context.Context, cfg *config.Config, dir string, glob string, re *regexp.Regexp, results *[]string, count *int, max int) error {
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil // Skip files we can't access
+			return nil
 		}
-
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-
 		if d.IsDir() {
-			// Skip hidden directories and common ignore patterns
 			name := d.Name()
 			if strings.HasPrefix(name, ".") && name != "." {
 				return filepath.SkipDir
@@ -117,67 +114,50 @@ func grepDir(ctx context.Context, cfg *config.Config, dir string, glob string, r
 			}
 			return nil
 		}
-
-		// Check read permission
 		if !cfg.CheckReadPermission(path) {
-			return nil // Skip files without permission
+			return nil
 		}
-
-		// Check glob pattern
 		if glob != "" {
-			matched, err := filepath.Match(glob, filepath.Base(path))
-			if err != nil || !matched {
+			matched, _ := filepath.Match(glob, filepath.Base(path))
+			if !matched {
 				return nil
 			}
 		}
-
-		// Skip binary/large files
 		if info, err := d.Info(); err == nil && info.Size() > 1024*1024 {
 			return nil
 		}
-
 		return grepFile(cfg, path, re, results, count, max)
 	})
 }
 
 func grepFile(cfg *config.Config, path string, re *regexp.Regexp, results *[]string, count *int, max int) error {
-	// Check read permission
 	if !cfg.CheckReadPermission(path) {
-		return nil // Skip files without permission
+		return nil
 	}
-
 	f, err := os.Open(path)
 	if err != nil {
-		return nil // Skip files we can't open
+		return nil
 	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	lineNum := 0
-	localCount := 0
-
 	for scanner.Scan() {
 		lineNum++
 		line := scanner.Text()
-
-		if re.MatchString(line) {
-			localCount++
-			*count++
-
-			if len(*results) < max {
-				// Truncate long lines
-				display := line
-				if len([]rune(display)) > 200 {
-					display = string([]rune(display)[:200]) + "..."
-				}
-				*results = append(*results, fmt.Sprintf("%s:%d: %s", path, lineNum, display))
+		if !re.MatchString(line) {
+			continue
+		}
+		*count++
+		if len(*results) < max {
+			if len(line) > 200 {
+				line = line[:200] + "..."
 			}
-
-			if *count >= max {
-				return nil
-			}
+			*results = append(*results, fmt.Sprintf("%s:%d: %s", path, lineNum, line))
+		}
+		if *count >= max {
+			return nil
 		}
 	}
-
 	return scanner.Err()
 }

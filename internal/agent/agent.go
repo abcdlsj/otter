@@ -168,14 +168,7 @@ func (a *Agent) runTools(ctx context.Context, calls []types.ToolCall, ch chan ev
 
 		t := a.tools.Get(tc.Name)
 		if t == nil {
-			ch <- event.Event{
-				Type: event.ToolEnd,
-				Data: event.ToolEndData{
-					ID:    tc.ID,
-					Name:  tc.Name,
-					Error: "unknown tool",
-				},
-			}
+			a.sendToolEnd(ch, tc.ID, tc.Name, "", "unknown tool")
 			results = append(results, types.ToolResult{
 				ToolCallID: tc.ID,
 				Content:    "error: unknown tool",
@@ -185,14 +178,7 @@ func (a *Agent) runTools(ctx context.Context, calls []types.ToolCall, ch chan ev
 
 		result, err := t.Run(ctx, json.RawMessage(tc.Args))
 		if err != nil {
-			ch <- event.Event{
-				Type: event.ToolEnd,
-				Data: event.ToolEndData{
-					ID:    tc.ID,
-					Name:  tc.Name,
-					Error: err.Error(),
-				},
-			}
+			a.sendToolEnd(ch, tc.ID, tc.Name, "", err.Error())
 			results = append(results, types.ToolResult{
 				ToolCallID: tc.ID,
 				Content:    "error: " + err.Error(),
@@ -200,24 +186,29 @@ func (a *Agent) runTools(ctx context.Context, calls []types.ToolCall, ch chan ev
 			continue
 		}
 
-		if len([]rune(result)) > 4000 {
-			result = string([]rune(result)[:4000]) + "\n... (truncated)"
+		if len(result) > 4000 {
+			result = result[:4000] + "\n... (truncated)"
 		}
 
-		ch <- event.Event{
-			Type: event.ToolEnd,
-			Data: event.ToolEndData{
-				ID:     tc.ID,
-				Name:   tc.Name,
-				Result: result,
-			},
-		}
+		a.sendToolEnd(ch, tc.ID, tc.Name, result, "")
 		results = append(results, types.ToolResult{
 			ToolCallID: tc.ID,
 			Content:    result,
 		})
 	}
 	return results
+}
+
+func (a *Agent) sendToolEnd(ch chan event.Event, id, name, result, err string) {
+	ch <- event.Event{
+		Type: event.ToolEnd,
+		Data: event.ToolEndData{
+			ID:     id,
+			Name:   name,
+			Result: result,
+			Error:  err,
+		},
+	}
 }
 
 func (a *Agent) GenerateTitle(ctx context.Context, lg logger.Logger, text string) (string, error) {
