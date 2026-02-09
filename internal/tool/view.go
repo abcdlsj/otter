@@ -195,6 +195,12 @@ func (v View) collectDirectoryEntries(ctx context.Context, dir string, currentDe
 			continue
 		}
 
+		// Get file info for size and mod time
+		info, err := entry.Info()
+		if err != nil {
+			continue // Skip entries we can't stat
+		}
+
 		if entry.IsDir() {
 			result = append(result, fmt.Sprintf("%s📁 %s/", indent, name))
 			if currentDepth < maxDepth {
@@ -207,7 +213,8 @@ func (v View) collectDirectoryEntries(ctx context.Context, dir string, currentDe
 		} else {
 			// Show file icon based on extension
 			icon := v.getFileIcon(name)
-			result = append(result, fmt.Sprintf("%s%s %s", indent, icon, name))
+			sizeStr := formatFileSize(info.Size())
+			result = append(result, fmt.Sprintf("%s%s %s (%s)", indent, icon, name, sizeStr))
 		}
 	}
 
@@ -216,6 +223,12 @@ func (v View) collectDirectoryEntries(ctx context.Context, dir string, currentDe
 
 func (v View) getFileIcon(name string) string {
 	ext := strings.ToLower(filepath.Ext(name))
+	
+	// Check for test files (both _test.go pattern and .test extension)
+	if strings.HasSuffix(name, "_test.go") || strings.HasSuffix(name, ".test") {
+		return "🧪"
+	}
+	
 	switch ext {
 	case ".go":
 		return "🐹"
@@ -235,9 +248,27 @@ func (v View) getFileIcon(name string) string {
 		return "📦"
 	case ".html", ".css":
 		return "🌐"
-	case ".test", "_test.go":
-		return "🧪"
 	default:
 		return "📄"
+	}
+}
+
+// formatFileSize formats file size in human-readable format
+func formatFileSize(bytes int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.2f GB", float64(bytes)/GB)
+	case bytes >= MB:
+		return fmt.Sprintf("%.2f MB", float64(bytes)/MB)
+	case bytes >= KB:
+		return fmt.Sprintf("%.1f KB", float64(bytes)/KB)
+	default:
+		return fmt.Sprintf("%d B", bytes)
 	}
 }
