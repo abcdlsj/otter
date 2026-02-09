@@ -420,36 +420,12 @@ func (m *Model) handleCommand(text string) (tea.Cmd, bool) {
 		return nil, true
 
 	case "/compact":
-		// Get current session and check if there are messages to compact
-		session := m.bus.GetSession(m.session)
-		if session == nil || len(session.Messages) < 10 {
-			m.messages = append(m.messages, message{
-				role:    "system",
-				content: "Not enough messages to compact (need at least 10).",
-			})
-			m.input.Reset()
-			m.updateViewport()
-			return nil, true
-		}
-
-		// Show starting message
 		m.messages = append(m.messages, message{
-			role:    "compact:start",
-			content: fmt.Sprintf("compacting %d messages", len(session.Messages)),
+			role:    "system",
+			content: "Auto-compact triggers at 60000 tokens or 20+ messages. Current session will be compacted automatically when needed.",
 		})
 		m.input.Reset()
 		m.updateViewport()
-
-		// Trigger compact immediately in a goroutine
-		go func() {
-			lg := logger.NewFileLogger(logger.SessionLogDir(m.sessionsDir, m.session))
-			success, before, after := m.agent.CompactNow(context.Background(), lg, session.Messages)
-			if success {
-				m.bus.Pub(msg.New(m.session, "system", fmt.Sprintf("Compacted: %d → %d tokens", before, after)))
-			} else {
-				m.bus.Pub(msg.New(m.session, "system", "Compact failed or not needed (below threshold)"))
-			}
-		}()
 		return nil, true
 
 	case "/help":

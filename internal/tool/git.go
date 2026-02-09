@@ -127,79 +127,45 @@ func (g Git) formatStatus(output string) string {
 	if strings.HasPrefix(output, "Error:") {
 		return output
 	}
-	
+
 	lines := strings.Split(output, "\n")
-	var result strings.Builder
-	
-	var branch string
+	var b strings.Builder
 	var staged, unstaged, untracked []string
-	
+
 	for _, line := range lines {
 		if len(line) == 0 {
 			continue
 		}
-		
-		// Parse branch info from first line
 		if strings.HasPrefix(line, "##") {
-			branchInfo := strings.TrimPrefix(line, "## ")
-			if idx := strings.Index(branchInfo, "..."); idx != -1 {
-				branch = branchInfo[:idx]
-			} else if idx := strings.Index(branchInfo, " "); idx != -1 {
-				branch = branchInfo[:idx]
-			} else {
-				branch = branchInfo
-			}
+			b.WriteString("Branch: " + strings.TrimPrefix(line, "## ") + "\n")
 			continue
 		}
-		
 		if len(line) < 2 {
 			continue
 		}
-		
-		x, y := line[0], line[1]
-		file := line[3:]
-		
+		x, y, file := line[0], line[1], line[3:]
 		switch {
 		case x != ' ' && x != '?':
-			// Staged changes
 			staged = append(staged, file)
 		case y != ' ':
-			// Unstaged changes
 			unstaged = append(unstaged, file)
 		case x == '?':
-			// Untracked
 			untracked = append(untracked, file)
 		}
 	}
-	
-	if branch != "" {
-		result.WriteString(fmt.Sprintf("On branch: %s\n", branch))
+
+	for _, f := range staged {
+		fmt.Fprintf(&b, "+ %s\n", f)
 	}
-	
-	if len(staged) > 0 {
-		result.WriteString(fmt.Sprintf("\nStaged (%d):\n", len(staged)))
-		for _, f := range staged {
-			result.WriteString(fmt.Sprintf("  + %s\n", f))
-		}
+	for _, f := range unstaged {
+		fmt.Fprintf(&b, "~ %s\n", f)
 	}
-	
-	if len(unstaged) > 0 {
-		result.WriteString(fmt.Sprintf("\nModified (%d):\n", len(unstaged)))
-		for _, f := range unstaged {
-			result.WriteString(fmt.Sprintf("  ~ %s\n", f))
-		}
+	for _, f := range untracked {
+		fmt.Fprintf(&b, "? %s\n", f)
 	}
-	
-	if len(untracked) > 0 {
-		result.WriteString(fmt.Sprintf("\nUntracked (%d):\n", len(untracked)))
-		for _, f := range untracked {
-			result.WriteString(fmt.Sprintf("  ? %s\n", f))
-		}
+
+	if len(staged)+len(unstaged)+len(untracked) == 0 {
+		b.WriteString("(clean)")
 	}
-	
-	if len(staged) == 0 && len(unstaged) == 0 && len(untracked) == 0 {
-		result.WriteString("\nWorking tree clean ✓")
-	}
-	
-	return result.String()
+	return b.String()
 }

@@ -1,119 +1,45 @@
 package prompt
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"runtime"
 	"strings"
-	"text/template"
 	"time"
 
 	"github.com/abcdlsj/otter/internal/tool"
 )
 
-// TemplateData holds the data available for prompt templates
-type TemplateData struct {
-	WorkingDir string
-	OS         string
-	Date       string
-	Tools      []ToolInfo
-	MaxSteps   int
-}
-
-// ToolInfo represents a tool for template rendering
-type ToolInfo struct {
-	Name string
-	Desc string
-}
-
-// Loader handles prompt loading and rendering
-type Loader struct {
-	tools    *tool.Set
-	maxSteps int
-}
-
-// NewLoader creates a new prompt loader
-func NewLoader(tools *tool.Set, maxSteps int) *Loader {
-	return &Loader{
-		tools:    tools,
-		maxSteps: maxSteps,
-	}
-}
-
-// Load loads and renders the default system prompt
-func (l *Loader) Load() (string, error) {
-	return l.render(defaultSystemPromptTemplate)
-}
-
-// LoadForMode loads prompt for a specific agent mode
-// Supported modes: "default", "plan", "explore"
-func (l *Loader) LoadForMode(mode string) (string, error) {
-	if mode == "" || mode == "default" {
-		return l.Load()
-	}
-
-	if tpl, ok := ModeTemplates[mode]; ok {
-		return l.render(tpl)
-	}
-
-	return l.Load()
-}
-
-func (l *Loader) render(tpl string) (string, error) {
-	funcMap := template.FuncMap{
-		"join": strings.Join,
-	}
-
-	template, err := template.New("prompt").Funcs(funcMap).Parse(tpl)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse template: %w", err)
-	}
-
-	data := l.buildData()
-	var buf bytes.Buffer
-	if err := template.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("failed to render template: %w", err)
-	}
-
-	return buf.String(), nil
-}
-
-func (l *Loader) buildData() TemplateData {
+// Load returns the system prompt for given mode
+func Load(tools *tool.Set, maxSteps int, mode string) string {
 	wd, _ := os.Getwd()
-
-	var tools []ToolInfo
-	if l.tools != nil {
-		for _, t := range l.tools.All() {
-			tools = append(tools, ToolInfo{
-				Name: t.Name(),
-				Desc: t.Desc(),
-			})
-		}
+	date := time.Now().Format("2006-01-02")
+	
+	var toolList strings.Builder
+	for _, t := range tools.All() {
+		fmt.Fprintf(&toolList, "- **%s**: %s\n", t.Name(), t.Desc())
 	}
 
-	return TemplateData{
-		WorkingDir: wd,
-		OS:         runtime.GOOS,
-		Date:       time.Now().Format("2006-01-02"),
-		Tools:      tools,
-		MaxSteps:   l.maxSteps,
+	if mode == "plan" {
+		return fmt.Sprintf(planPrompt, wd, runtime.GOOS, date, toolList.String())
 	}
+	if mode == "explore" {
+		return fmt.Sprintf(explorePrompt, wd, runtime.GOOS, date, toolList.String())
+	}
+	return fmt.Sprintf(defaultPrompt, wd, runtime.GOOS, date, toolList.String(), maxSteps)
 }
 
-// defaultSystemPromptTemplate is the built-in default prompt
-const defaultSystemPromptTemplate = `You are an AI coding assistant running in a terminal. You help users write, debug, and understand code by using tools to explore and modify their codebase.
+const defaultPrompt = `You are an AI coding assistant running in a terminal. You help users write, debug, and understand code by using tools to explore and modify their codebase.
 
 ## Environment
 
-- Working directory: {{.WorkingDir}}
-- OS: {{.OS}}
-- Date: {{.Date}}
+- Working directory: %s
+- OS: %s
+- Date: %s
 
 ## Available Tools
 
-{{range .Tools}}- **{{.Name}}**: {{.Desc}}
-{{end}}
+%s
 
 ## How to Work
 
@@ -149,20 +75,17 @@ IMPORTANT: Minimize the number of tool calls. Each tool call is a round-trip —
 - Don't run destructive commands (rm -rf, git reset --hard, etc.) without user confirmation.
 - Refuse to write malicious code.`
 
-// ModeTemplates contains system-defined templates for different agent modes
-var ModeTemplates = map[string]string{
-	"plan": `You are a planning-focused AI assistant. Your goal is to help users explore and understand their codebase.
+const planPrompt = `You are a planning-focused AI assistant. Your goal is to help users explore and understand their codebase.
 
 ## Environment
 
-- Working directory: {{.WorkingDir}}
-- OS: {{.OS}}
-- Date: {{.Date}}
+- Working directory: %s
+- OS: %s
+- Date: %s
 
 ## Available Tools (Read-Only Mode)
 
-{{range .Tools}}- **{{.Name}}**: {{.Desc}}
-{{end}}
+%s
 
 ## Guidelines
 
@@ -171,20 +94,19 @@ var ModeTemplates = map[string]string{
 - Help users plan changes before they execute them.
 - Provide clear explanations of how things work.
 - Suggest best practices and potential improvements.
-- Think step by step about the approach before suggesting any changes.`,
+- Think step by step about the approach before suggesting any changes.`
 
-	"explore": `You are a code exploration assistant. Help users quickly find and understand code.
+const explorePrompt = `You are a code exploration assistant. Help users quickly find and understand code.
 
 ## Environment
 
-- Working directory: {{.WorkingDir}}
-- OS: {{.OS}}
-- Date: {{.Date}}
+- Working directory: %s
+- OS: %s
+- Date: %s
 
 ## Available Tools
 
-{{range .Tools}}- **{{.Name}}**: {{.Desc}}
-{{end}}
+%s
 
 ## Guidelines
 
@@ -192,5 +114,4 @@ var ModeTemplates = map[string]string{
 - Use grep and search tools to locate code.
 - Provide concise summaries of what you find.
 - Reference exact file paths and line numbers.
-- Don't over-explain — just show the relevant code.`,
-}
+- Don't over-explain — just show the relevant code.`

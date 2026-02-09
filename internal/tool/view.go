@@ -15,7 +15,7 @@ type View struct{}
 
 func (View) Name() string { return "view" }
 func (View) Desc() string {
-	return "View file contents or directory structure. For files: displays content with line numbers. For directories: shows tree-like structure with files and subdirectories."
+	return "View file contents or directory structure. For files: displays content with line numbers. For directories: shows tree-like structure."
 }
 func (View) Args() map[string]any {
 	return map[string]any{
@@ -54,23 +54,18 @@ func (v View) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 	if args.Path == "" {
 		args.Path = "."
 	}
-
-	// Clean the path
 	args.Path = filepath.Clean(args.Path)
 
-	// Check read permission
 	cfg := &config.C
 	if !cfg.CheckReadPermission(args.Path) {
 		return "", fmt.Errorf("permission denied: cannot read %s", args.Path)
 	}
 
-	// Check if path exists
 	info, err := os.Stat(args.Path)
 	if err != nil {
 		return "", fmt.Errorf("cannot access path: %w", err)
 	}
 
-	// Handle directory
 	if info.IsDir() {
 		if args.Depth <= 0 {
 			args.Depth = 3
@@ -78,10 +73,8 @@ func (v View) Run(ctx context.Context, raw json.RawMessage) (string, error) {
 		if args.Depth > 5 {
 			args.Depth = 5
 		}
-		return v.viewDirectory(ctx, args.Path, args.Depth, cfg)
+		return v.viewDir(ctx, args.Path, args.Depth, cfg)
 	}
-
-	// Handle file
 	return v.viewFile(args.Path, args.ViewRange)
 }
 
@@ -94,10 +87,7 @@ func (v View) viewFile(path string, viewRange []int) (string, error) {
 	lines := strings.Split(string(content), "\n")
 	totalLines := len(lines)
 
-	// Determine range to display
-	startLine := 1
-	endLine := totalLines
-
+	startLine, endLine := 1, totalLines
 	if len(viewRange) >= 1 {
 		startLine = viewRange[0]
 		if startLine < 1 {
@@ -110,54 +100,59 @@ func (v View) viewFile(path string, viewRange []int) (string, error) {
 			endLine = totalLines
 		}
 	}
-
 	if startLine > endLine {
 		return "", fmt.Errorf("invalid range: start line %d is after end line %d", startLine, endLine)
 	}
 
-	// Build output with line numbers
-	var result strings.Builder
-	result.WriteString(fmt.Sprintf("// %s (%d lines total)\n", path, totalLines))
+	var b strings.Builder
+	fmt.Fprintf(&b, "// %s (%d lines total)\n", path, totalLines)
 
-	maxLineNumWidth := len(fmt.Sprintf("%d", endLine))
-	lineNumFormat := fmt.Sprintf("%%%d%%d| %%s\n", maxLineNumWidth)
+	maxWidth := len(fmt.Sprintf("%d", endLine))
+	format := fmt.Sprintf("%%%dd| %%s\n", maxWidth)
 
 	for i := startLine - 1; i < endLine && i < len(lines); i++ {
 		line := lines[i]
-		// Truncate very long lines
 		if len(line) > 200 {
 			line = line[:200] + "..."
 		}
-		result.WriteString(fmt.Sprintf(lineNumFormat, i+1, line))
+		fmt.Fprintf(&b, format, i+1, line)
 	}
 
-	// Add truncation notice if applicable
 	if startLine > 1 || endLine < totalLines {
-		result.WriteString(fmt.Sprintf("\n[Showing lines %d-%d of %d]", startLine, endLine, totalLines))
+		fmt.Fprintf(&b, "\n[Showing lines %d-%d of %d]", startLine, endLine, totalLines)
 	}
-
-	return result.String(), nil
+	return b.String(), nil
 }
 
-func (v View) viewDirectory(ctx context.Context, dir string, maxDepth int, cfg *config.Config) (string, error) {
-	var result strings.Builder
-	result.WriteString(fmt.Sprintf("// Directory: %s\n\n", dir))
+func (v View) viewDir(ctx context.Context, dir string, maxDepth int, cfg *config.Config) (string, error) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "// Directory: %s\n\n", dir)
 
-	entries, err := v.collectDirectoryEntries(ctx, dir, 0, maxDepth, cfg)
+	entries, err := v.collectEntries(ctx, dir, 0, maxDepth, cfg)
 	if err != nil {
 		return "", err
 	}
-
 	if len(entries) == 0 {
-		result.WriteString("(empty directory)")
-		return result.String(), nil
+		b.WriteString("(empty directory)")
+		return b.String(), nil
 	}
 
-	result.WriteString(strings.Join(entries, "\n"))
-	return result.String(), nil
+	for _, e := range entries {
+		b.WriteString(e)
+		b.WriteByte('\n')
+	}
+	return b.String(), nil
 }
 
-func (v View) collectDirectoryEntries(ctx context.Context, dir string, currentDepth, maxDepth int, cfg *config.Config) ([]string, error) {
+type dirEntry struct {
+	name     string
+	path     string
+	isDir    bool
+	depth    int
+	skipped  bool
+}
+
+func (v View) collectEntries(ctx context.Context, dir string, depth, maxDepth int, cfg *config.Config) ([]string, error) {
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -170,105 +165,55 @@ func (v View) collectDirectoryEntries(ctx context.Context, dir string, currentDe
 	}
 
 	var result []string
-	indent := strings.Repeat("  ", currentDepth)
+	indent := strings.Repeat("  ", depth)
 
-	for _, entry := range entries {
-		name := entry.Name()
-
-		// Skip hidden files and common ignore patterns
+	for _, e := range entries {
+		name := e.Name()
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
 
-		// Skip common build/output directories
-		if entry.IsDir() {
-			if name == "node_modules" || name == "vendor" || name == "dist" || name == "build" || name == "target" || name == "__pycache__" || name == ".git" {
-				result = append(result, fmt.Sprintf("%s📁 %s/ (skipped)", indent, name))
-				continue
-			}
-		}
-
 		fullPath := filepath.Join(dir, name)
-
-		// Check read permission
 		if !cfg.CheckReadPermission(fullPath) {
 			continue
 		}
 
-		// Get file info for size and mod time
-		info, err := entry.Info()
+		info, err := e.Info()
 		if err != nil {
-			continue // Skip entries we can't stat
+			continue
 		}
 
-		if entry.IsDir() {
-			result = append(result, fmt.Sprintf("%s📁 %s/", indent, name))
-			if currentDepth < maxDepth {
-				subEntries, err := v.collectDirectoryEntries(ctx, fullPath, currentDepth+1, maxDepth, cfg)
-				if err != nil {
-					continue // Skip directories we can't read
+		if e.IsDir() {
+			// Skip common directories
+			switch name {
+			case "node_modules", "vendor", "dist", "build", "target", "__pycache__", ".git":
+				result = append(result, fmt.Sprintf("%s%s/ (skipped)", indent, name))
+				continue
+			}
+			result = append(result, fmt.Sprintf("%s%s/", indent, name))
+			if depth < maxDepth {
+				sub, err := v.collectEntries(ctx, fullPath, depth+1, maxDepth, cfg)
+				if err == nil {
+					result = append(result, sub...)
 				}
-				result = append(result, subEntries...)
 			}
 		} else {
-			// Show file icon based on extension
-			icon := v.getFileIcon(name)
-			sizeStr := formatFileSize(info.Size())
-			result = append(result, fmt.Sprintf("%s%s %s (%s)", indent, icon, name, sizeStr))
+			size := formatSize(info.Size())
+			result = append(result, fmt.Sprintf("%s%s (%s)", indent, name, size))
 		}
 	}
-
 	return result, nil
 }
 
-func (v View) getFileIcon(name string) string {
-	ext := strings.ToLower(filepath.Ext(name))
-	
-	// Check for test files (both _test.go pattern and .test extension)
-	if strings.HasSuffix(name, "_test.go") || strings.HasSuffix(name, ".test") {
-		return "🧪"
-	}
-	
-	switch ext {
-	case ".go":
-		return "🐹"
-	case ".py":
-		return "🐍"
-	case ".js", ".ts", ".jsx", ".tsx":
-		return "📜"
-	case ".md":
-		return "📝"
-	case ".json", ".yaml", ".yml", ".toml":
-		return "⚙️"
-	case ".sh", ".bash", ".zsh":
-		return "🐚"
-	case ".dockerfile", ".dockerignore":
-		return "🐳"
-	case ".mod", ".sum":
-		return "📦"
-	case ".html", ".css":
-		return "🌐"
-	default:
-		return "📄"
-	}
-}
-
-// formatFileSize formats file size in human-readable format
-func formatFileSize(bytes int64) string {
-	const (
-		KB = 1024
-		MB = KB * 1024
-		GB = MB * 1024
-	)
-
+func formatSize(n int64) string {
 	switch {
-	case bytes >= GB:
-		return fmt.Sprintf("%.2f GB", float64(bytes)/GB)
-	case bytes >= MB:
-		return fmt.Sprintf("%.2f MB", float64(bytes)/MB)
-	case bytes >= KB:
-		return fmt.Sprintf("%.1f KB", float64(bytes)/KB)
+	case n >= 1<<30:
+		return fmt.Sprintf("%.2f GB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.2f MB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
 	default:
-		return fmt.Sprintf("%d B", bytes)
+		return fmt.Sprintf("%d B", n)
 	}
 }
