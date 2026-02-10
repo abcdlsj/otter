@@ -15,6 +15,7 @@ import (
 
 	"github.com/abcdlsj/otter/internal/agent"
 	"github.com/abcdlsj/otter/internal/config"
+	pctx "github.com/abcdlsj/otter/internal/context"
 	"github.com/abcdlsj/otter/internal/event"
 	"github.com/abcdlsj/otter/internal/llm"
 	"github.com/abcdlsj/otter/internal/logger"
@@ -55,6 +56,8 @@ type Model struct {
 	width  int
 	height int
 	ready  bool
+	
+	ctxMgr *pctx.Manager
 }
 
 func New(a *agent.Agent, t *tool.Set, b *msg.Bus) Model {
@@ -71,6 +74,16 @@ func New(a *agent.Agent, t *tool.Set, b *msg.Bus) Model {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#888A85"))
 
+	// Initialize context manager
+	var ctxMgr *pctx.Manager
+	if mgr, err := pctx.NewManager(); err == nil {
+		ctxMgr = mgr
+		// Auto-detect current project
+		if p, err := mgr.AutoDetect(); err == nil && p != nil {
+			a.SetProjectContext(p)
+		}
+	}
+
 	return Model{
 		agent:       a,
 		tools:       t,
@@ -80,6 +93,7 @@ func New(a *agent.Agent, t *tool.Set, b *msg.Bus) Model {
 		sessionsDir: config.SessionsDir(),
 		session:     newSessionID(),
 		autoScroll:  true,
+		ctxMgr:      ctxMgr,
 	}
 }
 
@@ -430,20 +444,99 @@ func (m *Model) handleCommand(text string) (tea.Cmd, bool) {
 
 	case "/help":
 		help := `Commands:
-  /new      Create new session
-  /clear    Clear messages
-  /sessions List all sessions
-  /switch   Switch session (e.g., /switch <session_id>)
-  /models   List available models
-  /model    Switch model (e.g., /model kimi/kimi-k2.5)
-  /compact  Compact conversation history to reduce tokens
-  /help     Show this help
+  /new       Create new session
+  /clear     Clear messages
+  /sessions  List all sessions
+  /switch    Switch session (e.g., /switch <session_id>)
+  /models    List available models
+  /model     Switch model (e.g., /model kimi/kimi-k2.5)
+  /compact   Compact conversation history to reduce tokens
+  /context   Show current project context
+  /projects  List all known projects
+  /forget    Forget current project context
+  /learn     Add topic to project context (e.g., /learn <topic>)
+  /help      Show this help
 
 Shortcuts:
-   Enter    Send message
-   Ctrl+J   New line
-   Ctrl+C   Quit`
+   Enter     Send message
+   Ctrl+J    New line
+   Ctrl+C    Quit`
 		m.messages = append(m.messages, message{role: "system", content: help})
+		m.input.Reset()
+		m.updateViewport()
+		return nil, true
+
+	case "/context":
+		if m.ctxMgr == nil {
+			m.messages = append(m.messages, message{role: "error", content: "Context manager not initialized"})
+		} else if p := m.agent.ProjectContext(); p != nil {
+			content := m.formatContext(p)
+			m.messages = append(m.messages, message{role: "system", content: content})
+		} else {
+			m.messages = append(m.messages, message{role: "system", content: "No project context. Run from a git repository to auto-detect."})
+		}
+		m.input.Reset()
+		m.updateViewport()
+		return nil, true
+
+	case "/projects":
+		if m.ctxMgr == nil {
+			m.messages = append(m.messages, message{role: "error", content: "Context manager not initialized"})
+		} else {
+			projects, err := m.ctxMgr.List()
+			if err != nil {
+				m.messages = append(m.messages, message{role: "error", content: fmt.Sprintf("Failed to list projects: %v", err)})
+			} else if len(projects) == 0 {
+				m.messages = append(m.messages, message{role: "system", content: "No known projects. Run from a git repository to auto-detect."})
+			} else {
+				var b strings.Builder
+				b.WriteString("Known projects:\n")
+				for _, p := range projects {
+					marker := "  "
+					if m.agent.ProjectContext() != nil && p.Path == m.agent.ProjectContext().Path {
+						marker = "* "
+					}
+					b.WriteString(fmt.Sprintf("%s%s (%s) - %s\n", marker, p.Name, p.Type, p.Path))
+				}
+				m.messages = append(m.messages, message{role: "system", content: b.String()})
+			}
+		}
+		m.input.Reset()
+		m.updateViewport()
+		return nil, true
+
+	case "/forget":
+		if m.ctxMgr == nil {
+			m.messages = append(m.messages, message{role: "error", content: "Context manager not initialized"})
+		} else if p := m.agent.ProjectContext(); p == nil {
+			m.messages = append(m.messages, message{role: "system", content: "No active project to forget"})
+		} else {
+			if err := m.ctxMgr.Forget(p.Path); err != nil {
+				m.messages = append(m.messages, message{role: "error", content: fmt.Sprintf("Failed to forget: %v", err)})
+			} else {
+				m.agent.SetProjectContext(nil)
+				m.messages = append(m.messages, message{role: "system", content: fmt.Sprintf("Forgot project: %s", p.Name)})
+			}
+		}
+		m.input.Reset()
+		m.updateViewport()
+		return nil, true
+
+	case "/learn":
+		if m.ctxMgr == nil {
+			m.messages = append(m.messages, message{role: "error", content: "Context manager not initialized"})
+		} else if len(parts) < 2 {
+			m.messages = append(m.messages, message{role: "system", content: "Usage: /learn <topic> - Add topic to current project context"})
+		} else if m.agent.ProjectContext() == nil {
+			m.messages = append(m.messages, message{role: "error", content: "No active project context. Run from a git repository first."})
+		} else {
+			topic := strings.Join(parts[1:], " ")
+			if err := m.ctxMgr.Learn(topic); err != nil {
+				m.messages = append(m.messages, message{role: "error", content: fmt.Sprintf("Failed to learn: %v", err)})
+			} else {
+				m.messages = append(m.messages, message{role: "system", content: fmt.Sprintf("Learned: %s", topic)})
+			}
+		}
 		m.input.Reset()
 		m.updateViewport()
 		return nil, true
@@ -451,6 +544,34 @@ Shortcuts:
 
 	return nil, false
 }
+
+func (m *Model) formatContext(p *pctx.ProjectContext) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Project: %s\n", p.Name))
+	b.WriteString(fmt.Sprintf("Path: %s\n", p.Path))
+	b.WriteString(fmt.Sprintf("Type: %s\n", p.Type))
+	if len(p.TechStack.Languages) > 0 {
+		b.WriteString(fmt.Sprintf("Languages: %s\n", strings.Join(p.TechStack.Languages, ", ")))
+	}
+	if len(p.TechStack.Frameworks) > 0 {
+		b.WriteString(fmt.Sprintf("Frameworks: %s\n", strings.Join(p.TechStack.Frameworks, ", ")))
+	}
+	if len(p.Commands.Build) > 0 {
+		b.WriteString(fmt.Sprintf("Build: %s\n", strings.Join(p.Commands.Build, ", ")))
+	}
+	if len(p.Commands.Test) > 0 {
+		b.WriteString(fmt.Sprintf("Test: %s\n", strings.Join(p.Commands.Test, ", ")))
+	}
+	if len(p.Commands.Dev) > 0 {
+		b.WriteString(fmt.Sprintf("Dev: %s\n", strings.Join(p.Commands.Dev, ", ")))
+	}
+	if len(p.RecentTopics) > 0 {
+		b.WriteString("Recent topics:\n")
+		for _, t := range p.RecentTopics {
+			b.WriteString(fmt.Sprintf("  - %s\n", t.Topic))
+		}
+	}
+	return b.String()
 
 func (m Model) handleEvent(ev event.Event) (tea.Model, tea.Cmd) {
 	switch ev.Type {

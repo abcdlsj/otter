@@ -11,7 +11,7 @@ import (
 )
 
 // Load returns the system prompt for given mode
-func Load(tools *tool.Set, maxSteps int, mode string) string {
+func Load(tools *tool.Set, maxSteps int, mode string, projectCtx string) string {
 	wd, _ := os.Getwd()
 	date := time.Now().Format("2006-01-02")
 	
@@ -20,13 +20,21 @@ func Load(tools *tool.Set, maxSteps int, mode string) string {
 		fmt.Fprintf(&toolList, "- **%s**: %s\n", t.Name(), t.Desc())
 	}
 
+	tmpl := defaultPrompt
 	if mode == "plan" {
-		return fmt.Sprintf(planPrompt, wd, runtime.GOOS, date, toolList.String())
+		tmpl = planPrompt
+	} else if mode == "explore" {
+		tmpl = explorePrompt
 	}
-	if mode == "explore" {
-		return fmt.Sprintf(explorePrompt, wd, runtime.GOOS, date, toolList.String())
+
+	prompt := fmt.Sprintf(tmpl, wd, runtime.GOOS, date, toolList.String())
+	
+	// Append project context if available
+	if projectCtx != "" {
+		prompt += projectCtx
 	}
-	return fmt.Sprintf(defaultPrompt, wd, runtime.GOOS, date, toolList.String(), maxSteps)
+	
+	return prompt
 }
 
 const defaultPrompt = `You are an AI coding assistant running in a terminal. You help users write, debug, and understand code by using tools to explore and modify their codebase.
@@ -53,7 +61,7 @@ const defaultPrompt = `You are an AI coding assistant running in a terminal. You
 
 IMPORTANT: Minimize the number of tool calls. Each tool call is a round-trip — be efficient.
 
-- **Combine operations**: If you can answer with one shell command, don't split it into three. Pipe commands together (e.g., "find | xargs wc -l" instead of first listing, then counting).
+- **Combine operations**: If you can answer with one shell command, don't split it into three. Pipe commands together (e.g. "find | xargs wc -l" instead of first listing, then counting).
 - **Be direct**: Go straight to the answer. Don't explore the directory structure if you can directly run the command that solves the user's request.
 - **Batch when possible**: If you need multiple pieces of information, combine them into a single command rather than making separate tool calls.
 - **Avoid redundant exploration**: Don't list files just to find files, then read files. Use file search with patterns to go directly to what you need.

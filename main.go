@@ -9,6 +9,7 @@ import (
 
 	"github.com/abcdlsj/otter/internal/agent"
 	"github.com/abcdlsj/otter/internal/config"
+	pctx "github.com/abcdlsj/otter/internal/context"
 	"github.com/abcdlsj/otter/internal/llm"
 	"github.com/abcdlsj/otter/internal/msg"
 	"github.com/abcdlsj/otter/internal/tool"
@@ -27,8 +28,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize context manager
+	ctxMgr, err := pctx.NewManager()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to init context manager: %v\n", err)
+		ctxMgr = nil
+	}
+
 	tools := tool.NewSet()
-	ag := agent.New(llmClient, tools)
+	
+	var ag *agent.Agent
+	if ctxMgr != nil {
+		ag = agent.NewWithContext(llmClient, tools, ctxMgr)
+	} else {
+		ag = agent.New(llmClient, tools)
+	}
+	
 	bus := msg.NewBus(config.SessionsDir())
 
 	model := tui.New(ag, tools, bus)

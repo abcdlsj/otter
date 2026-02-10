@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/abcdlsj/otter/internal/config"
+	pctx "github.com/abcdlsj/otter/internal/context"
 	"github.com/abcdlsj/otter/internal/event"
 	"github.com/abcdlsj/otter/internal/llm"
 	"github.com/abcdlsj/otter/internal/logger"
@@ -21,6 +22,8 @@ type Agent struct {
 	tools    *tool.Set
 	maxSteps int
 	mode     string
+	ctxMgr   *pctx.Manager
+	projCtx  *pctx.ProjectContext
 }
 
 func New(l *llm.LLM, t *tool.Set) *Agent {
@@ -40,6 +43,23 @@ func NewWithMode(l *llm.LLM, t *tool.Set, mode string) *Agent {
 		maxSteps: config.C.MaxSteps,
 		mode:     mode,
 	}
+}
+
+// NewWithContext creates agent with project context
+func NewWithContext(l *llm.LLM, t *tool.Set, mgr *pctx.Manager) *Agent {
+	a := &Agent{
+		llm:      l,
+		tools:    t,
+		maxSteps: config.C.MaxSteps,
+		mode:     "default",
+		ctxMgr:   mgr,
+	}
+	// Auto-detect project context
+	if p, err := mgr.AutoDetect(); err == nil && p != nil {
+		a.projCtx = p
+		mgr.SetCurrent(p)
+	}
+	return a
 }
 
 func (a *Agent) Run(ctx context.Context, lg logger.Logger, history []llm.Message, input string) <-chan event.Event {
@@ -231,12 +251,34 @@ const compactThreshold = 60000
 const compactKeepRecent = 6
 
 func (a *Agent) systemPrompt() string {
-	return prompt.Load(a.tools, a.maxSteps, a.mode)
+	ctx := ""
+	if a.projCtx != nil && a.ctxMgr != nil {
+		ctx = a.ctxMgr.Inject(a.projCtx)
+	}
+	return prompt.Load(a.tools, a.maxSteps, a.mode, ctx)
 }
 
 // SetMode changes the agent's mode dynamically
 func (a *Agent) SetMode(mode string) {
 	a.mode = mode
+}
+
+// ProjectContext returns current project context
+func (a *Agent) ProjectContext() *pctx.ProjectContext {
+	return a.projCtx
+}
+
+// SetProjectContext sets project context
+func (a *Agent) SetProjectContext(p *pctx.ProjectContext) {
+	a.projCtx = p
+	if a.ctxMgr != nil {
+		a.ctxMgr.SetCurrent(p)
+	}
+}
+
+// ContextManager returns context manager
+func (a *Agent) ContextManager() *pctx.Manager {
+	return a.ctxMgr
 }
 
 func (a *Agent) maybeCompact(ctx context.Context, lg logger.Logger, ch chan event.Event, messages []llm.Message) []llm.Message {
